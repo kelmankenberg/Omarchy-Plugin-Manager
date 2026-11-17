@@ -198,7 +198,7 @@ BarWidget {
     commandArgs = [
       "-r",
       "--arg", "id", moduleName,
-      "first(.bar.layout | to_entries[] | select(any(.value[]?; (.id // .) == $id)) | .key) // empty",
+      "first(.bar.layout | to_entries[] | select(any(.value[]?; (if type == \"object\" then .id else . end) == $id)) | .key) // empty",
       Quickshell.env("HOME") + "/.config/omarchy/shell.json"
     ]
     helper.running = true
@@ -415,7 +415,7 @@ BarWidget {
 
     if (requestType === "section") {
       var section = String(output || "").trim()
-      if (exitCode === 0 && ["left", "center", "right"].indexOf(section) !== -1) {
+      if (exitCode === 0 && ["left", "centerBegin", "center", "centerEnd", "right", "tray"].indexOf(section) !== -1) {
         currentSection = section
       } else {
         statusText = exitCode === 0 ? strings.t("positionFailed")

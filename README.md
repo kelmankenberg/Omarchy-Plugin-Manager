@@ -187,7 +187,10 @@ Omarchy hot-reloads changes; do not edit the packaged shell under `/usr/share/om
 omarchy plugin validate .
 qmllint BarWidget.qml
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
+node --test tests/test_placement.js
 ```
+
+The placement regression tests additionally require Node.js (development only).
 
 The stable plugin ID is `kel.plugin-manager`, independent of its display name.
 
