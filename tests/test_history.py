@@ -110,6 +110,50 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(self.source.exists())
         self.assertFalse(self.manager.listing()["entries"][0]["available"])
 
+    def test_prune_deletes_only_expired_backups_and_delete_all_clears_history(self):
+        old = self.uninstall()
+        record_path = self.manager.root / old["key"] / "record.json"
+        record = json.loads(record_path.read_text())
+        record["removedAt"] = "2000-01-01T00:00:00+00:00"
+        record_path.write_text(json.dumps(record))
+        self.source.mkdir()
+        (self.source / "manifest.json").write_text(json.dumps({"id": self.plugin_id}))
+        recent = self.uninstall()
+        listing = self.manager.listing()
+        self.assertGreater(listing["totalSize"], 0)
+        self.assertEqual(self.manager.perform({"action": "prune", "days": 30}), 1)
+        self.assertEqual([row["key"] for row in self.manager.listing()["entries"]], [recent["key"]])
+        for days in (0, True, "30", 5000):
+            with self.subTest(days=days), self.assertRaises(history.HistoryError):
+                self.manager.perform({"action": "prune", "days": days})
+        self.assertEqual(self.manager.perform({"action": "delete-all"}), 1)
+        self.assertEqual(self.manager.listing()["entries"], [])
+
+    def test_usage_does_not_follow_links_and_bulk_delete_keeps_installed_files(self):
+        row = self.uninstall()
+        directory = self.manager.root / row["key"]
+        outside = self.home / "outside"
+        outside.mkdir()
+        (outside / "large-file").write_bytes(b"x" * 100000)
+        (directory / "plugin/external").symlink_to(outside, target_is_directory=True)
+        self.source.mkdir()
+        (self.source / "keep").write_text("installed copy")
+        self.assertLess(self.manager.listing()["totalSize"], 100000)
+        self.manager.perform({"action": "delete-all"})
+        self.assertEqual((self.source / "keep").read_text(), "installed copy")
+        self.assertEqual((outside / "large-file").stat().st_size, 100000)
+
+    def test_bulk_delete_reports_partial_failure_and_continues(self):
+        first = self.uninstall()
+        self.source.mkdir()
+        (self.source / "manifest.json").write_text(json.dumps({"id": self.plugin_id}))
+        second = self.uninstall()
+        (self.manager.root / first["key"] / "unexpected").write_text("do not remove")
+        with self.assertRaisesRegex(history.HistoryError, "Deleted 1 backups; 1 failed"):
+            self.manager.perform({"action": "delete-all"})
+        self.assertTrue((self.manager.root / first["key"]).is_dir())
+        self.assertFalse((self.manager.root / second["key"]).exists())
+
     def test_deletion_affects_only_selected_backup(self):
         first = self.uninstall()
         self.source.mkdir()

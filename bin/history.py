@@ -10,13 +10,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import uuid
 
 
 MANAGER_ID = "kel.plugin-manager"
 MAX_JSON = 1024 * 1024
 MAX_RECORDS = 1000
+ACTIONS = ("uninstall", "restore", "delete", "prune", "delete-all")
 
 
 class HistoryError(Exception):
@@ -62,6 +63,22 @@ def sync_directory(path):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def disk_usage(path):
+    # lstat without following links: linked installs count only the link itself.
+    total = 0
+    def report_error(error):
+        raise error
+
+    for directory, folders, files in os.walk(path, followlinks=False, onerror=report_error):
+        for name in folders + files:
+            try:
+                total += os.lstat(os.path.join(directory, name)).st_blocks * 512
+            except FileNotFoundError:
+                # Plugins can remove temporary files while a backup is measured.
+                continue
+    return total
 
 
 def command(argv, json_output=False):
@@ -115,7 +132,8 @@ class History:
         ):
             raise HistoryError(f"Invalid history metadata: {key}")
         try:
-            datetime.fromisoformat(record["removedAt"])
+            if datetime.fromisoformat(record["removedAt"]).tzinfo is None:
+                raise ValueError("Removal date must include its timezone.")
         except ValueError as error:
             raise HistoryError(f"Invalid removal date: {key}") from error
         return path, {field: record[field] for field in ("key", "id", "name", "linked", "removedAt")}
@@ -155,9 +173,13 @@ class History:
                     record,
                     available=os.path.lexists(payload),
                     installed=os.path.lexists(installed),
+                    size=disk_usage(directory),
                 ))
             entries.sort(key=lambda row: row["removedAt"], reverse=True)
-            return {"ok": True, "busy": False, "entries": entries, "operation": operation}
+            return {
+                "ok": True, "busy": False, "entries": entries, "operation": operation,
+                "totalSize": sum(row["size"] for row in entries),
+            }
 
     def installed(self):
         plugins = command(["omarchy", "plugin", "list", "--json"], json_output=True)
@@ -296,10 +318,33 @@ class History:
         if action == "delete":
             self.delete(request.get("key"))
             return 1
+        if action == "prune":
+            days = request.get("days")
+            if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
+                raise HistoryError("Invalid backup retention period.")
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            return self.delete_many(lambda record: datetime.fromisoformat(record["removedAt"]) < cutoff)
+        if action == "delete-all":
+            return self.delete_many(lambda record: True)
         raise HistoryError("Unknown history action.")
 
+    def delete_many(self, matches):
+        deleted = 0
+        failures = []
+        for path in [path for path in self.root.iterdir() if not path.name.startswith(".")]:
+            try:
+                _, record = self.read_record(path.name)
+                if matches(record):
+                    self.delete(path.name)
+                    deleted += 1
+            except (HistoryError, OSError, ValueError) as error:
+                failures.append(f"{path.name}: {error}")
+        if failures:
+            raise HistoryError(f"Deleted {deleted} backups; {len(failures)} failed. {failures[0]}")
+        return deleted
+
     def start(self, request):
-        if not isinstance(request, dict) or request.get("action") not in ("uninstall", "restore", "delete"):
+        if not isinstance(request, dict) or request.get("action") not in ACTIONS:
             raise HistoryError("Invalid history request.")
         with self.lock() as lock:
             try:

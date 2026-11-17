@@ -1,4 +1,5 @@
 import QtQuick
+import QtCore as Core
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import Quickshell
@@ -14,6 +15,43 @@ BarWidget {
   Commons.Translations {
     id: strings
     directory: Qt.resolvedUrl("i18n")
+  }
+
+  // Stored outside the plugin folder so saving preferences doesn't hot-reload the plugin.
+  Core.Settings {
+    id: preferences
+    location: "file://" + (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config"))
+      + "/omarchy/plugin-manager/settings.ini"
+    property bool defaultDisabledOnly: false
+    property bool defaultUserInstalledOnly: false
+    property bool hideNative: false
+    property string iconColorRule: "any"
+    property bool showBarCount: false
+    property int retentionDays: 0
+    property bool skipUninstallConfirm: false
+    onRetentionDaysChanged: root.nextRetentionCheck = 0
+  }
+
+  property double nextRetentionCheck: 0
+  property bool historyLoaded: false
+  property bool pendingDeleteAll: false
+  property real backupSize: 0
+  readonly property var visiblePlugins: preferences.hideNative
+    ? plugins.filter(function(plugin) { return !plugin.firstParty }) : plugins
+  readonly property int iconDisabledCount: plugins.filter(function(plugin) {
+    return !plugin.enabled && (preferences.iconColorRule !== "user" || !plugin.firstParty)
+  }).length
+  readonly property bool iconHighlighted: preferences.iconColorRule !== "never" && iconDisabledCount > 0
+  readonly property bool barCountVisible: preferences.showBarCount && iconDisabledCount > 0 && !root.vertical
+
+  function formatBytes(bytes) {
+    var units = ["B", "KB", "MB", "GB", "TB"]
+    var index = 0
+    while (bytes >= 1024 && index < units.length - 1) {
+      bytes /= 1024
+      index++
+    }
+    return Commons.I18n.formatNumber(bytes, index === 0 ? 0 : 1) + " " + units[index]
   }
 
   property bool popupOpen: false
@@ -68,11 +106,11 @@ BarWidget {
     close()
   }
 
-  readonly property int disabledCount: plugins.filter(function(plugin) { return !plugin.enabled }).length
-  readonly property var selectedPlugins: plugins.filter(function(plugin) {
+  readonly property int disabledCount: visiblePlugins.filter(function(plugin) { return !plugin.enabled }).length
+  readonly property var selectedPlugins: visiblePlugins.filter(function(plugin) {
     return selectedIds.indexOf(plugin.id) !== -1
   })
-  readonly property var filteredPlugins: plugins.filter(function(plugin) {
+  readonly property var filteredPlugins: visiblePlugins.filter(function(plugin) {
     var needle = filterText.trim().toLowerCase()
     var matchesText = !needle || (plugin.name + " " + plugin.id).toLowerCase().indexOf(needle) !== -1
     return matchesText && (!showDisabledOnly || !plugin.enabled)
@@ -125,6 +163,9 @@ BarWidget {
 
   function open() {
     popupOpen = true
+    showDisabledOnly = preferences.defaultDisabledOnly
+    showUserInstalledOnly = preferences.defaultUserInstalledOnly
+    nextRetentionCheck = 0
     refresh()
     refreshHistory()
   }
@@ -134,6 +175,7 @@ BarWidget {
     settingsOpen = false
     pendingUninstallIds = []
     pendingHistoryDelete = null
+    pendingDeleteAll = false
   }
 
   function toggle() {
@@ -178,6 +220,10 @@ BarWidget {
         return plugin.id !== root.moduleName && !plugin.firstParty && plugin.kinds.indexOf("bar") === -1
       })
       if (targets.length) {
+        if (preferences.skipUninstallConfirm) {
+          startHistoryAction({ action: "uninstall", ids: targets.map(function(plugin) { return plugin.id }) })
+          return
+        }
         pendingUninstallIds = targets.map(function(plugin) { return plugin.id })
         return
       }
@@ -215,6 +261,7 @@ BarWidget {
     historyReading = true
     statusText = strings.t("historyWorking")
     pendingHistoryDelete = null
+    pendingDeleteAll = false
     historyHelper.running = true
   }
 
@@ -241,8 +288,13 @@ BarWidget {
                   || !isFinite(new Date(row.removedAt).getTime())
                   || typeof row.available !== "boolean" || typeof row.installed !== "boolean"
                   || typeof row.linked !== "boolean"
+                  || typeof row.size !== "number" || !(row.size >= 0)
               })) throw new Error("Invalid uninstall history entries")
           uninstallHistory = result.entries
+          if (typeof result.totalSize !== "number" || !isFinite(result.totalSize)
+              || result.totalSize < 0) throw new Error("Invalid backup size")
+          backupSize = result.totalSize
+          historyLoaded = true
         } else if (!result.busy) {
           throw new Error("Missing uninstall history entries")
         }
@@ -251,7 +303,7 @@ BarWidget {
         if (!historyBusy && operation && operation.token !== lastHistoryToken) {
           if (typeof operation.token !== "string" || !/^[a-f0-9]{32}$/.test(operation.token)
               || typeof operation.ok !== "boolean"
-              || ["uninstall", "restore", "delete"].indexOf(operation.action) === -1) {
+              || ["uninstall", "restore", "delete", "prune", "delete-all"].indexOf(operation.action) === -1) {
             throw new Error("Invalid history operation result")
           }
           lastHistoryToken = operation.token
@@ -407,6 +459,7 @@ BarWidget {
       root.showHistory = false
       root.open()
       root.settingsOpen = true
+      Qt.callLater(function() { settingsClose.forceActiveFocus() })
     }
     function history() {
       root.showHistory = true
@@ -422,6 +475,23 @@ BarWidget {
         historyBusy: root.historyBusy,
         historyView: root.showHistory,
         historyEntries: root.uninstallHistory.length,
+        backupBytes: root.backupSize,
+        settingsOpen: root.settingsOpen,
+        settingsScrollHeight: settingsFlickable.contentHeight,
+        settingsScrollPosition: settingsFlickable.contentY,
+        visiblePlugins: root.visiblePlugins.length,
+        filteredPlugins: root.filteredPlugins.length,
+        iconHighlighted: root.iconHighlighted,
+        barLabel: button.labelText,
+        preferences: {
+          defaultDisabledOnly: preferences.defaultDisabledOnly,
+          defaultUserInstalledOnly: preferences.defaultUserInstalledOnly,
+          hideNative: preferences.hideNative,
+          iconColorRule: preferences.iconColorRule,
+          showBarCount: preferences.showBarCount,
+          retentionDays: preferences.retentionDays,
+          skipUninstallConfirm: preferences.skipUninstallConfirm
+        },
         error: root.statusText,
         plugins: root.plugins.length,
         scrollbarVisible: listScrollBar.visible,
@@ -453,13 +523,30 @@ BarWidget {
     }
   }
 
+  component SettingsHeading: Text {
+    textFormat: Text.PlainText
+    color: Commons.Color.accent
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    font.bold: true
+  }
+
+  component SettingsToggle: Toggle {
+    width: parent.width
+    foreground: Commons.Color.popups.text
+    titleSize: Style.font.bodySmall
+    descriptionSize: Style.font.caption
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
     text: "\uf1e6"
     fontFamily: "JetBrainsMono Nerd Font"
-    foreground: root.disabledCount > 0 ? Commons.Color.accent : "#ffffff"
+    foreground: root.iconHighlighted ? Commons.Color.accent : "#ffffff"
+    labelText: root.barCountVisible ? Commons.I18n.formatNumber(root.iconDisabledCount) : ""
+    slotSize: Style.bar.iconSlot * (root.barCountVisible ? 2 : 1)
     tooltipText: strings.t("tooltip")
     onPressed: root.toggle()
   }
@@ -501,7 +588,7 @@ BarWidget {
           Text {
             textFormat: Text.PlainText
             text: "\uf1e6"
-            color: root.disabledCount > 0 ? Commons.Color.accent : Commons.Color.popups.text
+            color: root.iconHighlighted ? Commons.Color.accent : Commons.Color.popups.text
             font.family: "JetBrainsMono Nerd Font"
             font.pixelSize: Style.font.subtitle
           }
@@ -898,15 +985,18 @@ BarWidget {
         MouseArea { anchors.fill: parent }
 
         Flickable {
+          id: settingsFlickable
           anchors.fill: parent
           anchors.margins: Style.space(14)
           contentWidth: width
           contentHeight: settingsContent.implicitHeight
           clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          Controls.ScrollBar.vertical: ManagerScrollBar { id: settingsScrollBar }
 
           Column {
             id: settingsContent
-            width: parent.width
+            width: parent.width - (settingsScrollBar.visible ? settingsScrollBar.width + Style.space(6) : 0)
             spacing: Style.space(14)
             LayoutMirroring.enabled: Commons.I18n.rightToLeft
             LayoutMirroring.childrenInherit: true
@@ -958,13 +1048,135 @@ BarWidget {
               }
             }
 
+            SettingsHeading { text: strings.t("listSettings") }
+            SettingsToggle {
+              label: strings.t("defaultDisabledOnly")
+              checked: preferences.defaultDisabledOnly
+              onClicked: preferences.defaultDisabledOnly = !checked
+            }
+            SettingsToggle {
+              label: strings.t("defaultUserInstalledOnly")
+              checked: preferences.defaultUserInstalledOnly
+              onClicked: preferences.defaultUserInstalledOnly = !checked
+            }
+            SettingsToggle {
+              label: strings.t("hideNative")
+              description: strings.t("hideNativeHelp")
+              checked: preferences.hideNative
+              onClicked: {
+                preferences.hideNative = !checked
+                root.selectedIds = root.selectedPlugins.map(function(plugin) { return plugin.id })
+                root.pendingUninstallIds = []
+              }
+            }
+
+            SettingsHeading { text: strings.t("barIconSettings") }
+            Dropdown {
+              width: parent.width
+              label: strings.t("iconColorRule")
+              value: preferences.iconColorRule
+              options: [
+                { value: "any", label: strings.t("iconRuleAny") },
+                { value: "user", label: strings.t("iconRuleUser") },
+                { value: "never", label: strings.t("iconRuleNever") }
+              ]
+              onChanged: function(value) { preferences.iconColorRule = value }
+            }
+            SettingsToggle {
+              label: strings.t("showBarCount")
+              description: strings.t("showBarCountHelp")
+              checked: preferences.showBarCount
+              onClicked: preferences.showBarCount = !checked
+            }
+
+            SettingsHeading { text: strings.t("backupSettings") }
+            Dropdown {
+              width: parent.width
+              label: strings.t("backupRetention")
+              value: String(preferences.retentionDays)
+              options: [
+                { value: "0", label: strings.t("retainForever") },
+                { value: "7", label: strings.t("retainDays").arg(Commons.I18n.formatNumber(7)) },
+                { value: "30", label: strings.t("retainDays").arg(Commons.I18n.formatNumber(30)) },
+                { value: "90", label: strings.t("retainDays").arg(Commons.I18n.formatNumber(90)) },
+                { value: "365", label: strings.t("retainDays").arg(Commons.I18n.formatNumber(365)) }
+              ]
+              onChanged: function(value) {
+                preferences.retentionDays = Number(value)
+              }
+            }
             Text {
+              width: parent.width
               textFormat: Text.PlainText
-              text: strings.t("feedback")
+              text: strings.t("retentionHelp")
               color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("backupUsage").arg(root.formatBytes(root.backupSize))
+                .arg(Commons.I18n.formatNumber(root.uninstallHistory.length))
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
+            Button {
+              width: parent.width
+              text: strings.t("deleteAllBackups")
+              focusable: root.settingsOpen
+              enabled: !root.busy && root.uninstallHistory.length > 0
+              onClicked: root.pendingDeleteAll = true
+            }
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.pendingDeleteAll
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: strings.t("confirmDeleteAll")
+                color: Commons.Color.urgent
+                wrapMode: Text.WordWrap
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              RowLayout {
+                width: parent.width
+                Button {
+                  text: strings.t("cancel")
+                  focusable: root.settingsOpen
+                  onClicked: root.pendingDeleteAll = false
+                }
+                Button {
+                  text: strings.t("deletePermanently")
+                  focusable: root.settingsOpen
+                  enabled: !root.busy
+                  onClicked: root.startHistoryAction({ action: "delete-all" })
+                }
+              }
+              Text {
+                width: parent.width
+                visible: root.statusText !== ""
+                textFormat: Text.PlainText
+                text: root.statusText
+                color: Commons.Color.popups.text
+                wrapMode: Text.WordWrap
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+            SettingsToggle {
+              label: strings.t("skipUninstallConfirm")
+              description: strings.t("skipUninstallConfirmHelp")
+              checked: preferences.skipUninstallConfirm
+              onClicked: preferences.skipUninstallConfirm = !checked
+            }
+
+            SettingsHeading { text: strings.t("feedback") }
             Button {
               width: parent.width
               iconText: "\uf188"
@@ -995,6 +1207,20 @@ BarWidget {
             }
           }
         }
+      }
+    }
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: preferences.retentionDays > 0 && root.historyLoaded && !root.busy
+    onTriggered: {
+      if (Date.now() < root.nextRetentionCheck) return
+      root.nextRetentionCheck = Date.now() + 3600000
+      var cutoff = Date.now() - preferences.retentionDays * 86400000
+      if (root.uninstallHistory.some(function(row) { return new Date(row.removedAt).getTime() < cutoff })) {
+        root.startHistoryAction({ action: "prune", days: preferences.retentionDays })
       }
     }
   }
