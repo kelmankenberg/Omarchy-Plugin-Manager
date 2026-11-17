@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement to Omarchy Plugin Manager.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: Filled in automatically when opened from the plugin's settings drawer.
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: omarchy-version
+    attributes:
+      label: Omarchy version
+      description: Output of `omarchy version`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

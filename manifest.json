@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "kel.plugin-manager",
   "name": "Omarchy Plugin Manager",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "kelmankenberg",
   "license": "MIT",
-  "description": "Review installed Omarchy shell plugins and manage them in batches.",
+  "description": "Manage Omarchy plugins in batches with local uninstall backups and restore history.",
   "kinds": ["bar-widget"],
   "entryPoints": { "barWidget": "BarWidget.qml" },
   "barWidget": {

@@ -33,8 +33,40 @@ BarWidget {
   property var pendingUninstallIds: []
   property string pendingSection: ""
   property string currentSection: "right"
+  property bool showHistory: false
+  property var uninstallHistory: []
+  property var pendingHistoryDelete: null
+  property bool historyBusy: false
+  property bool historyReading: false
+  property string historyMode: "list"
+  property var historyRequest: ({})
+  property string lastHistoryToken: ""
+  property string omarchyVersion: ""
+  readonly property string repositoryUrl: "https://github.com/kelmankenberg/Omarchy-Plugin-Manager"
+  readonly property string pluginVersion: {
+    try {
+      var version = String(JSON.parse(manifestFile.text()).version || "")
+      return /^[0-9A-Za-z.+-]{1,32}$/.test(version) ? version : ""
+    } catch (error) {
+      return ""
+    }
+  }
+  readonly property bool busy: helper.running || actionQueue.length > 0
+    || historyBusy || historyReading
 
-  Component.onCompleted: readSection()
+  Component.onCompleted: {
+    readSection()
+    refreshHistory()
+    versionReader.running = true
+  }
+
+  function openIssue(template) {
+    var url = repositoryUrl + "/issues/new?template=" + template
+      + "&version=" + encodeURIComponent(pluginVersion)
+      + "&omarchy-version=" + encodeURIComponent(omarchyVersion)
+    Util.execArgv(["xdg-open", url])
+    close()
+  }
 
   readonly property int disabledCount: plugins.filter(function(plugin) { return !plugin.enabled }).length
   readonly property var selectedPlugins: plugins.filter(function(plugin) {
@@ -94,12 +126,14 @@ BarWidget {
   function open() {
     popupOpen = true
     refresh()
+    refreshHistory()
   }
 
   function close() {
     popupOpen = false
     settingsOpen = false
     pendingUninstallIds = []
+    pendingHistoryDelete = null
   }
 
   function toggle() {
@@ -108,7 +142,7 @@ BarWidget {
   }
 
   function refresh(showLoading) {
-    if (helper.running || actionQueue.length) return
+    if (helper.running || actionQueue.length || historyBusy) return
     if (showLoading !== false) statusText = strings.t("loading")
     requestType = "list"
     commandProgram = "omarchy"
@@ -129,7 +163,7 @@ BarWidget {
   }
 
   function startBatch(action) {
-    if (helper.running || actionQueue.length) return
+    if (busy) return
     var targets = []
     if (action === "enable") {
       targets = selectedPlugins.filter(function(plugin) {
@@ -161,10 +195,84 @@ BarWidget {
   function confirmUninstall() {
     var ids = pendingUninstallIds.slice()
     pendingUninstallIds = []
-    if (!ids.length || helper.running || actionQueue.length) return
-    queueActions(ids.map(function(id) {
-      return ["plugin", "remove", id, "--yes"]
-    }))
+    if (!ids.length || busy) return
+    startHistoryAction({ action: "uninstall", ids: ids })
+  }
+
+  function refreshHistory() {
+    if (historyReading) return
+    historyMode = "list"
+    historyRequest = {}
+    historyReading = true
+    historyHelper.running = true
+  }
+
+  function startHistoryAction(request) {
+    if (busy) return
+    historyMode = "start"
+    historyRequest = request
+    historyBusy = true
+    historyReading = true
+    statusText = strings.t("historyWorking")
+    pendingHistoryDelete = null
+    historyHelper.running = true
+  }
+
+  function finishHistory(exitCode, output, errorOutput) {
+    historyReading = false
+    var result
+    try {
+      if (output.length > 1048576) throw new Error("History response exceeded its size limit")
+      result = JSON.parse(output)
+      if (!result || typeof result.ok !== "boolean") throw new Error("Invalid history response")
+      if (exitCode !== 0 || !result.ok) {
+        throw new Error(String(result.error || errorOutput || strings.t("historyFailed")))
+      }
+      if (typeof result.busy !== "boolean") throw new Error("Invalid history operation state")
+      if (historyMode === "list") {
+        if (result.entries !== null) {
+          if (!Array.isArray(result.entries) || result.entries.length > 1000
+              || result.entries.some(function(row) {
+                return !row || typeof row.key !== "string" || !/^[a-f0-9]{32}$/.test(row.key)
+                  || typeof row.id !== "string" || row.id.length > 128
+                  || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(row.id)
+                  || typeof row.name !== "string" || row.name.length > 160
+                  || typeof row.removedAt !== "string" || row.removedAt.length > 64
+                  || !isFinite(new Date(row.removedAt).getTime())
+                  || typeof row.available !== "boolean" || typeof row.installed !== "boolean"
+                  || typeof row.linked !== "boolean"
+              })) throw new Error("Invalid uninstall history entries")
+          uninstallHistory = result.entries
+        } else if (!result.busy) {
+          throw new Error("Missing uninstall history entries")
+        }
+        historyBusy = result.busy
+        var operation = result.operation
+        if (!historyBusy && operation && operation.token !== lastHistoryToken) {
+          if (typeof operation.token !== "string" || !/^[a-f0-9]{32}$/.test(operation.token)
+              || typeof operation.ok !== "boolean"
+              || ["uninstall", "restore", "delete"].indexOf(operation.action) === -1) {
+            throw new Error("Invalid history operation result")
+          }
+          lastHistoryToken = operation.token
+          if (!operation.ok) {
+            statusText = String(operation.error || strings.t("historyFailed")).slice(0, 2000)
+            console.warn("Plugin Manager: " + statusText)
+          } else {
+            statusText = strings.t("historyDone_" + operation.action)
+          }
+          refresh(false)
+        }
+      } else {
+        historyBusy = true
+        if (historyRequest.action === "uninstall") showHistory = true
+        Qt.callLater(root.refreshHistory)
+      }
+    } catch (error) {
+      historyBusy = false
+      statusText = String(error.message || strings.t("historyFailed")).slice(0, 2000)
+      console.warn("Plugin Manager: " + statusText)
+    }
   }
 
   function queueActions(args) {
@@ -188,7 +296,7 @@ BarWidget {
   }
 
   function moveTo(section) {
-    if (helper.running || actionQueue.length || section === currentSection) return
+    if (busy || section === currentSection) return
     pendingSection = section
     requestType = "move"
     commandProgram = "omarchy"
@@ -295,12 +403,25 @@ BarWidget {
   ShellIpc {
     target: root.moduleName
     function open() { root.open() }
+    function settings() {
+      root.showHistory = false
+      root.open()
+      root.settingsOpen = true
+    }
+    function history() {
+      root.showHistory = true
+      root.settingsOpen = false
+      root.open()
+    }
     function close() { root.close() }
     function toggle() { root.toggle() }
     function status(): string {
       return JSON.stringify({
         opened: root.opened,
-        busy: helper.running,
+        busy: root.busy,
+        historyBusy: root.historyBusy,
+        historyView: root.showHistory,
+        historyEntries: root.uninstallHistory.length,
         error: root.statusText,
         plugins: root.plugins.length,
         scrollbarVisible: listScrollBar.visible,
@@ -308,6 +429,27 @@ BarWidget {
         listContentHeight: pluginList.contentHeight,
         panel: { x: popup.cardOrigin.x, y: popup.cardOrigin.y, width: popup.contentWidth, height: popup.contentHeight }
       })
+    }
+  }
+
+  component ManagerScrollBar: Controls.ScrollBar {
+    id: scrollControl
+    policy: Controls.ScrollBar.AsNeeded
+    visible: size < 1
+    interactive: true
+    implicitWidth: Style.space(10)
+    LayoutMirroring.enabled: false
+    anchors.right: parent.right
+    contentItem: Rectangle {
+      implicitWidth: Style.space(6)
+      implicitHeight: Style.space(32)
+      radius: width / 2
+      color: scrollControl.pressed || scrollControl.hovered
+        ? Commons.Color.accent : Util.alpha(Commons.Color.popups.text, 0.55)
+    }
+    background: Rectangle {
+      radius: width / 2
+      color: Util.alpha(Commons.Color.popups.text, 0.1)
     }
   }
 
@@ -375,8 +517,11 @@ BarWidget {
           Button {
             text: strings.t("refresh")
             focusable: true
-            enabled: !helper.running && actionQueue.length === 0
-            onClicked: root.refresh()
+            enabled: !root.busy
+            onClicked: {
+              root.refresh()
+              root.refreshHistory()
+            }
           }
           Button {
             id: settingsButton
@@ -401,6 +546,30 @@ BarWidget {
 
           RowLayout {
             width: parent.width
+            Button {
+              text: strings.t("installedView")
+              active: !root.showHistory
+              focusable: true
+              onClicked: {
+                root.showHistory = false
+                root.pendingHistoryDelete = null
+              }
+            }
+            Button {
+              text: strings.t("historyView")
+              active: root.showHistory
+              focusable: true
+              onClicked: {
+                root.showHistory = true
+                root.pendingUninstallIds = []
+                root.refreshHistory()
+              }
+            }
+          }
+
+          RowLayout {
+            width: parent.width
+            visible: !root.showHistory
             TextField {
               Layout.fillWidth: true
               placeholderText: strings.t("search")
@@ -411,13 +580,14 @@ BarWidget {
               text: root.selectableIds.length && root.selectableIds.every(function(id) { return root.selected(id) })
                 ? strings.t("clearSelection") : strings.t("selectAll")
               focusable: true
-              enabled: !helper.running && actionQueue.length === 0 && root.selectableIds.length > 0
+              enabled: !root.busy && root.selectableIds.length > 0
               onClicked: root.toggleSelectAll()
             }
           }
 
           RowLayout {
             width: parent.width
+            visible: !root.showHistory
             Text {
               Layout.fillWidth: true
               textFormat: Text.PlainText
@@ -450,29 +620,14 @@ BarWidget {
           ListView {
             id: pluginList
             width: parent.width
+            visible: !root.showHistory
             height: Math.min(Math.max(Style.space(50), root.filteredPlugins.length * Style.space(40)), Style.space(360))
             clip: true
             spacing: Style.space(2)
             boundsBehavior: Flickable.StopAtBounds
             model: root.filteredPlugins
-            Controls.ScrollBar.vertical: Controls.ScrollBar {
+            Controls.ScrollBar.vertical: ManagerScrollBar {
               id: listScrollBar
-              policy: Controls.ScrollBar.AsNeeded
-              interactive: true
-              implicitWidth: Style.space(10)
-              LayoutMirroring.enabled: false
-              anchors.right: parent.right
-              contentItem: Rectangle {
-                implicitWidth: Style.space(6)
-                implicitHeight: Style.space(32)
-                radius: width / 2
-                color: listScrollBar.pressed || listScrollBar.hovered
-                  ? Commons.Color.accent : Util.alpha(Commons.Color.popups.text, 0.55)
-              }
-              background: Rectangle {
-                radius: width / 2
-                color: Util.alpha(Commons.Color.popups.text, 0.1)
-              }
             }
             delegate: Button {
               required property var modelData
@@ -489,13 +644,13 @@ BarWidget {
               leftAlign: true
               active: root.selected(modelData.id)
               focusable: true
-              enabled: modelData.id !== root.moduleName
+              enabled: !root.busy && modelData.id !== root.moduleName
               onClicked: root.toggleSelected(modelData.id)
             }
           }
 
           Text {
-            visible: root.filteredPlugins.length === 0
+            visible: !root.showHistory && root.filteredPlugins.length === 0
             textFormat: Text.PlainText
             text: strings.t(root.showDisabledOnly ? "noDisabled" : "empty")
             color: Commons.Color.popups.text
@@ -505,32 +660,33 @@ BarWidget {
 
           RowLayout {
             width: parent.width
+            visible: !root.showHistory
             Button {
               Layout.fillWidth: true
               text: strings.t("enableSelected")
               focusable: true
-              enabled: !helper.running && actionQueue.length === 0 && root.enableCount > 0
+              enabled: !root.busy && root.enableCount > 0
               onClicked: root.startBatch("enable")
             }
             Button {
               Layout.fillWidth: true
               text: strings.t("disableSelected")
               focusable: true
-              enabled: !helper.running && actionQueue.length === 0 && root.disableCount > 0
+              enabled: !root.busy && root.disableCount > 0
               onClicked: root.startBatch("disable")
             }
             Button {
               Layout.fillWidth: true
               text: strings.t("uninstallSelected")
               focusable: true
-              enabled: !helper.running && actionQueue.length === 0 && root.removableCount > 0
+              enabled: !root.busy && root.removableCount > 0
               onClicked: root.startBatch("remove")
             }
           }
 
           RowLayout {
             width: parent.width
-            visible: root.pendingUninstallIds.length > 0
+            visible: !root.showHistory && root.pendingUninstallIds.length > 0
             Text {
               Layout.fillWidth: true
               textFormat: Text.PlainText
@@ -549,7 +705,142 @@ BarWidget {
             Button {
               text: strings.t("confirmUninstall")
               focusable: true
+              enabled: !root.busy
               onClicked: root.confirmUninstall()
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.showHistory
+
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("historyHelp")
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            ListView {
+              id: historyList
+              width: parent.width
+              height: Math.min(contentHeight, Style.space(360))
+              clip: true
+              spacing: Style.space(8)
+              boundsBehavior: Flickable.StopAtBounds
+              model: root.uninstallHistory
+              Controls.ScrollBar.vertical: ManagerScrollBar { id: historyScrollBar }
+              delegate: Rectangle {
+                required property var modelData
+                width: historyList.width - (historyScrollBar.visible ? historyScrollBar.width + Style.space(6) : 0)
+                height: historyRow.implicitHeight + Style.space(16)
+                color: Util.alpha(Commons.Color.popups.text, 0.05)
+                radius: Style.cornerRadius
+                RowLayout {
+                  id: historyRow
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(8)
+                  Column {
+                    Layout.fillWidth: true
+                    spacing: Style.space(3)
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: modelData.name
+                      elide: Text.ElideRight
+                      color: Commons.Color.accent
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: modelData.id
+                      elide: Text.ElideRight
+                      color: Commons.Color.popups.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: strings.t("historyDate").arg(new Date(modelData.removedAt)
+                        .toLocaleString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat))
+                      elide: Text.ElideRight
+                      color: Commons.Color.popups.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Text {
+                      width: parent.width
+                      visible: modelData.linked || !modelData.available || modelData.installed
+                      textFormat: Text.PlainText
+                      text: strings.t(!modelData.available ? "historyMissing"
+                        : modelData.installed ? "historyConflict" : "historyLinked")
+                      color: Commons.Color.popups.text
+                      wrapMode: Text.WordWrap
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                  Button {
+                    text: strings.t("restore")
+                    focusable: true
+                    enabled: !root.busy && modelData.available && !modelData.installed
+                    onClicked: root.startHistoryAction({ action: "restore", key: modelData.key })
+                  }
+                  Button {
+                    text: strings.t("deleteBackup")
+                    focusable: true
+                    enabled: !root.busy
+                    onClicked: root.pendingHistoryDelete = modelData
+                  }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.uninstallHistory.length === 0 && !root.historyBusy
+              textFormat: Text.PlainText
+              text: strings.t("historyEmpty")
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            RowLayout {
+              width: parent.width
+              visible: root.pendingHistoryDelete !== null
+              Text {
+                Layout.fillWidth: true
+                textFormat: Text.PlainText
+                text: strings.t("confirmDeleteBackup")
+                  .arg(root.pendingHistoryDelete ? root.pendingHistoryDelete.name : "")
+                color: Commons.Color.urgent
+                wrapMode: Text.WordWrap
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Button {
+                text: strings.t("cancel")
+                focusable: true
+                onClicked: root.pendingHistoryDelete = null
+              }
+              Button {
+                text: strings.t("deletePermanently")
+                focusable: true
+                enabled: !root.busy
+                onClicked: root.startHistoryAction({
+                  action: "delete", key: root.pendingHistoryDelete.key
+                })
+              }
             }
           }
 
@@ -661,14 +952,93 @@ BarWidget {
                   text: strings.t(modelData)
                   active: root.currentSection === modelData
                   focusable: root.settingsOpen
-                  enabled: !helper.running && actionQueue.length === 0
+                  enabled: !root.busy
                   onClicked: root.moveTo(modelData)
                 }
               }
             }
+
+            Text {
+              textFormat: Text.PlainText
+              text: strings.t("feedback")
+              color: Commons.Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+            Button {
+              width: parent.width
+              iconText: "\uf188"
+              fontFamily: "JetBrainsMono Nerd Font"
+              text: strings.t("reportBug")
+              leftAlign: true
+              focusable: root.settingsOpen
+              onClicked: root.openIssue("bug_report.yml")
+            }
+            Button {
+              width: parent.width
+              iconText: "\uf0eb"
+              fontFamily: "JetBrainsMono Nerd Font"
+              text: strings.t("requestFeature")
+              leftAlign: true
+              focusable: root.settingsOpen
+              onClicked: root.openIssue("feature_request.yml")
+            }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("versionInfo").arg(root.pluginVersion || "?").arg(root.omarchyVersion || "?")
+              color: Commons.Color.popups.text
+              opacity: 0.7
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
           }
         }
       }
+    }
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.historyBusy
+    onTriggered: root.refreshHistory()
+  }
+
+  FileView {
+    id: manifestFile
+    path: decodeURIComponent(Qt.resolvedUrl("manifest.json").toString().replace(/^file:\/\//, ""))
+    blockLoading: true
+    printErrors: false
+  }
+
+  Process {
+    id: versionReader
+    command: ["omarchy", "version"]
+    stdout: StdioCollector { id: versionOutput; waitForEnd: true }
+    onExited: function(exitCode) {
+      var version = String(versionOutput.text || "").trim()
+      if (exitCode === 0 && /^[0-9A-Za-z.+_-]{1,64}$/.test(version)) root.omarchyVersion = version
+    }
+  }
+
+  Process {
+    id: historyHelper
+    command: ["python3", decodeURIComponent(Qt.resolvedUrl("bin/history.py").toString()
+      .replace(/^file:\/\//, "")), root.historyMode]
+    stdinEnabled: true
+    stdout: StdioCollector { id: historyOutput; waitForEnd: true }
+    stderr: StdioCollector { id: historyErrors; waitForEnd: true }
+    onStarted: {
+      historyHelper.write(JSON.stringify(root.historyRequest))
+      historyHelper.stdinEnabled = false
+    }
+    onExited: function(exitCode) {
+      historyHelper.stdinEnabled = true
+      Qt.callLater(function() {
+        root.finishHistory(exitCode, historyOutput.text, historyErrors.text)
+      })
     }
   }
 

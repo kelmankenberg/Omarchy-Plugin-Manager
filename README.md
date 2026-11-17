@@ -13,6 +13,9 @@ disabling, or uninstalling them in batches.
 - Highlight disabled plugins in the current theme's primary accent color.
 - Select individual plugins or select all visible, eligible plugins.
 - Batch enable, disable, or uninstall selected plugins.
+- Keep local uninstall backups, restore plugins disabled, or permanently delete backups.
+- Report bugs or request features from the settings drawer; the GitHub issue
+  form opens with the plugin and Omarchy versions already filled in.
 - Scroll long lists using the mouse wheel or the draggable right-side scrollbar.
 - Open the gear menu for a settings drawer with left, center, and right bar placement.
 - Follow the active Omarchy theme and language, with English translations included.
@@ -25,7 +28,7 @@ filter hides them.
 
 - Omarchy Quattro with the Quickshell-based shell, `qs.Ui` components, and
   `Commons.Translations`.
-- The standard `omarchy` CLI and `jq`.
+- The standard `omarchy` CLI, `jq`, and Python 3 (standard library only).
 - JetBrainsMono Nerd Font for the plug and gear icons (included with Omarchy).
 
 No separate service, build step, network polling, or API credentials are required.
@@ -55,6 +58,12 @@ Click the plug icon to open the manager. Select the plugins you want to manage,
 then click **Enable selected**, **Disable selected**, or **Uninstall selected**.
 Uninstall requires a separate confirmation.
 
+Open **Uninstall history** to see removed plugins and their removal dates.
+**Restore** puts the plugin back without enabling it; enable it from
+**Installed** when ready. Restoration removes the entry from uninstall history.
+**Delete** asks for confirmation before permanently deleting that backup. It
+does not touch a separately installed copy with the same ID.
+
 **Select all** and **Clear selection** apply to the currently visible, eligible
 plugins. Existing selections hidden by a filter are retained: the selected count
 and batch actions include them. Review your selection before applying an action.
@@ -68,18 +77,47 @@ drawer is already closed.
 
 ## Safety and removal
 
-The manager uses Omarchy's own plugin commands, one plugin at a time. Batch
-operations are not atomic: if a command fails, the remaining operations stop,
-the error is displayed, and completed changes remain applied.
+The manager uses Omarchy's plugin commands to change enabled state. Uninstall
+then moves the plugin into local backup storage instead of using Omarchy's
+destructive removal command. Batch operations are not atomic: if an operation
+fails, the remaining operations stop, the error is displayed, and completed
+changes remain applied.
 
 - Native plugins cannot be uninstalled through this widget.
 - The manager cannot disable or uninstall itself through its own list.
 - Alternate full-bar plugins cannot be uninstalled through this widget. Enabling
   an alternate bar uses Omarchy's normal bar-switching behavior.
 - Plugins Omarchy marks as non-disableable are excluded from batch enable/disable.
-- Git-managed plugin checkouts are deleted by Omarchy's removal command, including
-  local modifications. Non-Git plugin directories are moved to a hidden backup.
-  Symlink installations are unlinked.
+- Directory backups preserve the entire plugin folder, including `.git`, local
+  modifications, and files the plugin stores inside its own folder.
+- A symlink installation backs up **only the link**. Its external target is
+  neither copied nor removed; restoring requires that target to still exist.
+  Symlinks and external Git worktree metadata inside a directory also remain
+  references, not independent snapshots.
+- Restore never overwrites an installed plugin and clears its enabled entries
+  through Omarchy before returning its files to plugin discovery.
+- Uninstall history operations run in a separate worker, so shell plugin reloads
+  do not interrupt a batch. A lock prevents competing history operations.
+- An interrupted operation may leave a history record without backup files.
+  Such entries are labeled and can be deleted without removing an installed copy.
+
+### Backup storage
+
+Backups and operation metadata live in the private, hidden directory
+`~/.config/omarchy/plugins/.kel.plugin-manager-history/`, outside this plugin's
+repository and excluded from Omarchy's plugin discovery. Keeping backups on
+the same filesystem allows a rename instead of a potentially incomplete copy.
+
+Backups have no expiry and continue using disk space until restored or deleted;
+the history allows up to 1,000 entries. Removing or updating the manager itself
+does not remove them. Treat backups as private: they contain the original local
+files and can include sensitive content stored by other plugins. This does not
+back up files those plugins keep elsewhere, or preserve their old bar placement
+and settings from `shell.json`.
+
+The most recent operation result survives shell reloads. If a worker is
+interrupted, history reports it rather than claiming success. Diagnostic output
+is kept in `.worker.log` inside the backup directory.
 
 To disable or remove this widget:
 
@@ -88,9 +126,10 @@ omarchy plugin disable kel.plugin-manager
 omarchy plugin remove kel.plugin-manager
 ```
 
-The plugin stores no credentials or private data. Its placement and enabled
+The manager requests no credentials or network access. Its placement and enabled
 state live in Omarchy's `~/.config/omarchy/shell.json`; search, filters, and
-selection are session-only.
+selection are session-only. Local uninstall backups persist separately as
+described above.
 
 ## Development
 
@@ -100,6 +139,7 @@ Omarchy hot-reloads changes; do not edit the packaged shell under `/usr/share/om
 ```bash
 omarchy plugin validate .
 qmllint BarWidget.qml
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
 The stable plugin ID is `kel.plugin-manager`, independent of its display name.

@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a problem with Omarchy Plugin Manager.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Opening this form from the plugin's settings
+        drawer fills in the versions automatically.
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: Shown in the plugin's settings drawer, or run `jq -r .version ~/.config/omarchy/plugins/kel.plugin-manager/manifest.json`.
+      placeholder: "1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: omarchy-version
+    attributes:
+      label: Omarchy version
+      description: Output of `omarchy version`.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem, including any error shown in the plugin.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the plugin manager
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: "Optional: `journalctl --user --since '10 minutes ago' -o cat | grep -i 'plugin manager'`. Remove anything private."
+      render: text
