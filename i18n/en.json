@@ -1,0 +1,53 @@
+{
+  "title": "Omarchy Plugin Manager",
+  "settings": "Settings",
+  "closeSettings": "Close settings",
+  "tooltip": "Omarchy Plugin Manager",
+  "refresh": "Refresh",
+  "loading": "Loading plugins…",
+  "search": "Filter plugins by name or ID",
+  "empty": "No plugins match this filter.",
+  "noDisabled": "No disabled plugins match this filter.",
+  "selectAll": "Select all",
+  "clearSelection": "Clear selection",
+  "disabledOnly": "Disabled only",
+  "userInstalledOnly": "User installed only",
+  "showAll": "Show all",
+  "enabled": "Enabled",
+  "disabled": "Disabled",
+  "native": "Native Omarchy",
+  "userInstalled": "User installed",
+  "pluginRow": "[%1] %2 - %3 (%4)",
+  "current": "This widget",
+  "moveTo": "Bar position",
+  "left": "Left",
+  "center": "Center",
+  "right": "Right",
+  "enableSelected": "Enable selected",
+  "disableSelected": "Disable selected",
+  "uninstallSelected": "Uninstall selected",
+  "cancel": "Cancel",
+  "confirmUninstall": "Confirm uninstall",
+  "confirmRemove": {
+    "one": "Remove %1 selected third-party plugin? Git-managed checkouts are deleted; other plugin folders are moved to a backup.",
+    "other": "Remove %1 selected third-party plugins? Git-managed checkouts are deleted; other plugin folders are moved to a backup."
+  },
+  "noActions": "No selected plugins can use that action.",
+  "loadFailed": "Could not load the plugin list.",
+  "invalidList": "The plugin list returned invalid data.",
+  "positionFailed": "Could not read this widget's bar position.",
+  "commandFailed": "Plugin command failed.",
+  "batchDone": {
+    "one": "Finished managing %1 plugin.",
+    "other": "Finished managing %1 plugins."
+  },
+  "moveDone": "Moved this widget to the %1 section.",
+  "selectionCount": {
+    "one": "%1 selected",
+    "other": "%1 selected"
+  },
+  "disabledCount": {
+    "one": "%1 disabled",
+    "other": "%1 disabled"
+  }
+}
