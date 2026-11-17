@@ -1,7 +1,8 @@
 # Omarchy Plugin Manager
 
 A native Omarchy shell bar widget for reviewing installed plugins and enabling,
-disabling, or uninstalling them in batches.
+disabling, or uninstalling them in batches, with restorable local backups and
+persistent settings.
 
 ![Omarchy Plugin Manager showing plugin sources, states, filters, and batch actions](preview.png)
 
@@ -10,14 +11,20 @@ disabling, or uninstalling them in batches.
 - Search installed plugins by name or ID.
 - Distinguish **Native Omarchy** plugins from **User installed** plugins.
 - Combine **Disabled only** and **User installed only** filters.
+- Save default filters and optionally hide native plugins entirely.
 - Highlight disabled plugins in the current theme's primary accent color.
+- Choose when the bar icon uses the accent color and optionally display a
+  disabled-plugin count.
 - Select individual plugins or select all visible, eligible plugins.
 - Batch enable, disable, or uninstall selected plugins.
 - Keep local uninstall backups, restore plugins disabled, or permanently delete backups.
+- See backup disk usage, set automatic retention, or delete all backups with
+  confirmation.
 - Report bugs or request features from the settings drawer; the GitHub issue
   form opens with the plugin and Omarchy versions already filled in.
 - Scroll long lists using the mouse wheel or the draggable right-side scrollbar.
 - Open the gear menu for a settings drawer with left, center, and right bar placement.
+- Keep your preferences across shell restarts; optionally skip uninstall confirmation.
 - Follow the active Omarchy theme and language, with English translations included.
 
 By default the plug icon is white when every plugin is enabled and uses the
@@ -73,19 +80,26 @@ also refreshes when the popup opens and after a batch action.
 
 Click the gear to open settings. Close the drawer with its close button, the
 gear, Escape, or a click on the shaded list. Escape closes the popup when the
-drawer is already closed.
+drawer is already closed. Scroll within the drawer to reach backup controls
+and Feedback.
 
 ### Settings
 
-Settings persist across shell restarts in
-`${XDG_CONFIG_HOME:-~/.config}/omarchy/plugin-manager/settings.ini`.
+![Settings drawer showing saved filter defaults and bar icon controls](settings-preview.png)
 
-| Section | Options |
-| --- | --- |
-| Plugin list | Start each opening with **Disabled only**, **User installed only**, or both. **Hide native plugins** excludes native rows from list counts and selection entirely; ordinary filters retain hidden selections. |
-| Bar icon | Accent for **any disabled plugin**, **disabled user plugins only**, or **never**. Optional disabled count appears on horizontal bars, following the color rule (always-white mode counts all disabled plugins). |
-| Uninstall backups | Allocated disk usage, retention of **forever**, **7**, **30**, **90**, or **365 days**, and **Delete all backups** with permanent-deletion confirmation. |
-| Confirmation | Optionally skip uninstall confirmation; backups are still retained. Manual permanent deletion always requires confirmation. |
+| Setting | Behavior | Default |
+| --- | --- | --- |
+| Default filters | Open with **Disabled only**, **User installed only**, or both. These defaults are reapplied whenever the popup opens. | Both off |
+| Hide native plugins | Exclude native plugins from list rows, list counts, and selection. Ordinary search and filter controls still retain hidden selections. | Off |
+| Icon accent rule | Accent when **any plugin** is disabled, when **a user plugin** is disabled, or **never** (always white). Independent of list filters. | Any disabled plugin |
+| Show disabled count | Display a count beside the plug on horizontal bars. Counts follow the accent rule; always-white mode counts all disabled plugins. Hide the number when none are disabled. | Off |
+| Backup retention | Keep forever or automatically delete backups after **7**, **30**, **90**, or **365 days**. | Keep forever |
+| Backup disk usage and cleanup | Show allocated space and backup count. **Delete all backups** requires a separate permanent-deletion confirmation and never removes installed plugins. | No automatic cleanup |
+| Skip uninstall confirmation | Uninstall immediately when clicked, still retaining a local backup. Manual backup deletion continues to require confirmation. | Off |
+
+Bar placement and the bug-report/feature-request buttons are also in the drawer.
+Preferences persist across shell restarts in
+`${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugin-manager/settings.ini`.
 
 Retention defaults to **Keep forever**. Choosing an expiry opts into permanent
 automatic deletion, including already-expired backups. Checks run when the
@@ -93,13 +107,27 @@ manager opens, after changing retention, and hourly while the shell is running.
 There is no background timer when the shell is stopped. Disk usage measures
 allocated local blocks without following symlinks.
 
+### Bug reports and feature requests
+
+Open the gear menu, scroll to **Feedback**, and select **Report a bug** or
+**Request a feature**. Your browser opens the corresponding GitHub issue form
+with the installed plugin and Omarchy versions filled in. Review and complete
+the form before submitting; the manager never submits reports automatically.
+A GitHub account is required to submit an issue.
+
+You can also use the repository's [issue forms](https://github.com/kelmankenberg/Omarchy-Plugin-Manager/issues/new/choose).
+When opening them directly rather than from the manager, enter the versions
+yourself. The plugin version appears in settings, and `omarchy version` prints
+the Omarchy version. Remove private information before attaching logs.
+
 ## Safety and removal
 
 The manager uses Omarchy's plugin commands to change enabled state. Uninstall
 then moves the plugin into local backup storage instead of using Omarchy's
-destructive removal command. Batch operations are not atomic: if an operation
-fails, the remaining operations stop, the error is displayed, and completed
-changes remain applied.
+destructive removal command. Batch operations are not atomic: if an enable,
+disable, or uninstall operation fails, the remaining operations stop, the error
+is displayed, and completed changes remain applied. Bulk backup cleanup attempts
+each entry and reports any partial failures without deleting unexpected files.
 
 - Native plugins cannot be uninstalled through this widget.
 - The manager cannot disable or uninstall itself through its own list.
@@ -127,8 +155,8 @@ repository and excluded from Omarchy's plugin discovery. Keeping backups on
 the same filesystem allows a rename instead of a potentially incomplete copy.
 
 Backups have no expiry by default and continue using disk space until restored
-or deleted (manually or by opt-in retention);
-the history allows up to 1,000 entries. Removing or updating the manager itself
+or deleted (manually or by opt-in retention). The history allows up to 1,000
+entries. Removing or updating the manager itself
 does not remove them. Treat backups as private: they contain the original local
 files and can include sensitive content stored by other plugins. This does not
 back up files those plugins keep elsewhere, or preserve their old bar placement
@@ -147,8 +175,8 @@ omarchy plugin remove kel.plugin-manager
 
 The manager requests no credentials or network access. Its placement and enabled
 state live in Omarchy's `~/.config/omarchy/shell.json`; search, current filters, and
-selection are session-only, while settings and default filters persist. Local uninstall backups persist separately as
-described above.
+selection are session-only, while settings and default filters persist. Local
+uninstall backups persist separately as described above.
 
 ## Development
 
