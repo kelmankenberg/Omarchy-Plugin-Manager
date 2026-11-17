@@ -1,8 +1,8 @@
 # Omarchy Plugin Manager
 
-A native Omarchy shell bar widget for reviewing installed plugins and enabling,
-disabling, or uninstalling them in batches, with restorable local backups and
-persistent settings.
+An MIT-licensed native Omarchy shell bar widget for reviewing installed plugins
+and enabling, disabling, or uninstalling them in batches, with restorable local
+backups and persistent settings.
 
 ![Omarchy Plugin Manager showing plugin sources, states, filters, and batch actions](preview.png)
 
@@ -196,4 +196,4 @@ The stable plugin ID is `kel.plugin-manager`, independent of its display name.
 
 ## License
 
-[MIT](LICENSE)
+Released under the [MIT License](LICENSE). Copyright (c) 2026 kelmankenberg.

@@ -8,7 +8,7 @@ body:
     attributes:
       label: Plugin version
       description: Filled in automatically when opened from the plugin's settings drawer.
-      placeholder: "1.1.0"
+      placeholder: "1.2.1"
     validations:
       required: true
   - type: input

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "kel.plugin-manager",
   "name": "Omarchy Plugin Manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "kelmankenberg",
   "license": "MIT",
   "description": "Manage Omarchy plugins in batches with local uninstall backups and restore history.",
