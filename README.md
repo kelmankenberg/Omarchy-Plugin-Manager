@@ -36,6 +36,7 @@ rule and add a disabled count beside the icon.
 - Omarchy Quattro with the Quickshell-based shell, `qs.Ui` components, and
   `Commons.Translations`.
 - The standard `omarchy` CLI, `jq`, and Python 3 (standard library only).
+- `xdg-open` for opening GitHub feedback forms in your browser (included with Omarchy).
 - JetBrainsMono Nerd Font for the plug and gear icons (included with Omarchy).
 
 No separate service, build step, network polling, or API credentials are required.
