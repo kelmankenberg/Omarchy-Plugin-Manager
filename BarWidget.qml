@@ -2,6 +2,7 @@ import QtQuick
 import QtCore as Core
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
+import QtQuick.Window
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -35,6 +36,10 @@ BarWidget {
   property double nextRetentionCheck: 0
   property bool historyLoaded: false
   property bool pendingDeleteAll: false
+  property int pendingRetentionDays: -1
+  property string settingsSection: "list"
+  property string historyFilterText: ""
+  property string restoredPluginId: ""
   property real backupSize: 0
   readonly property var visiblePlugins: preferences.hideNative
     ? plugins.filter(function(plugin) { return !plugin.firstParty }) : plugins
@@ -60,6 +65,7 @@ BarWidget {
   property var plugins: []
   property var selectedIds: []
   property string filterText: ""
+  property var customFilterTerms: []
   property bool showDisabledOnly: false
   property bool showUserInstalledOnly: false
   property string statusText: ""
@@ -69,6 +75,12 @@ BarWidget {
   property var actionQueue: []
   property int actionIndex: 0
   property var pendingUninstallIds: []
+  property var pendingUninstallSkipped: []
+  property bool reviewHiddenSelection: false
+  property string actionVerb: ""
+  property var actionNames: []
+  property var completedActionNames: []
+  property var skippedActionNames: []
   property string pendingSection: ""
   property string currentSection: "right"
   property bool showHistory: false
@@ -111,10 +123,19 @@ BarWidget {
     return selectedIds.indexOf(plugin.id) !== -1
   })
   readonly property var filteredPlugins: visiblePlugins.filter(function(plugin) {
-    var needle = filterText.trim().toLowerCase()
-    var matchesText = !needle || (plugin.name + " " + plugin.id).toLowerCase().indexOf(needle) !== -1
-    return matchesText && (!showDisabledOnly || !plugin.enabled)
+    return root.matchesCustomFilter(plugin) && (!showDisabledOnly || !plugin.enabled)
       && (!showUserInstalledOnly || !plugin.firstParty)
+  })
+  readonly property var hiddenSelectedPlugins: selectedPlugins.filter(function(plugin) {
+    return !root.filteredPlugins.some(function(visible) { return visible.id === plugin.id })
+  })
+  readonly property var listPlugins: reviewHiddenSelection ? hiddenSelectedPlugins : filteredPlugins
+  readonly property var filteredHistory: uninstallHistory.filter(function(entry) {
+    var needle = historyFilterText.trim().toLowerCase()
+    return !needle || (entry.name + " " + entry.id).toLowerCase().indexOf(needle) !== -1
+  })
+  readonly property var pendingUninstallPlugins: plugins.filter(function(plugin) {
+    return pendingUninstallIds.indexOf(plugin.id) !== -1
   })
   readonly property int selectedCount: selectedPlugins.length
   readonly property int enableCount: selectedPlugins.filter(function(plugin) {
@@ -127,7 +148,8 @@ BarWidget {
     return plugin.id !== root.moduleName && !plugin.firstParty && plugin.kinds.indexOf("bar") === -1
   }).length
   readonly property var selectableIds: filteredPlugins.filter(function(plugin) {
-    return plugin.id !== root.moduleName && plugin.canDisable
+    return plugin.id !== root.moduleName && (plugin.canDisable
+      || (!plugin.firstParty && plugin.kinds.indexOf("bar") === -1))
   }).map(function(plugin) { return plugin.id })
 
   function countText(key, count) {
@@ -147,18 +169,137 @@ BarWidget {
     selectedIds = next
   }
 
-  function toggleSelectAll() {
+  function selectVisible() {
     var next = selectedIds.slice()
-    var allSelected = selectableIds.length > 0
-      && selectableIds.every(function(id) { return next.indexOf(id) !== -1 })
-    if (allSelected) {
-      next = next.filter(function(id) { return selectableIds.indexOf(id) === -1 })
-    } else {
-      selectableIds.forEach(function(id) {
-        if (next.indexOf(id) === -1) next.push(id)
-      })
-    }
+    selectableIds.forEach(function(id) {
+      if (next.indexOf(id) === -1) next.push(id)
+    })
     selectedIds = next
+  }
+
+  function matchesCustomFilter(plugin) {
+    var terms = customFilterTerms.slice()
+    var draft = filterText.trim()
+    if (draft) terms.push(draft)
+    if (!terms.length) return true
+    var text = (plugin.name + " " + plugin.id).toLowerCase()
+    return terms.some(function(term) { return text.indexOf(term.toLowerCase()) !== -1 })
+  }
+
+  function addCustomFilter() {
+    var term = filterText.trim()
+    if (!term) return
+    if (!customFilterTerms.some(function(existing) { return existing.toLowerCase() === term.toLowerCase() }))
+      customFilterTerms = customFilterTerms.concat([term])
+    filterText = ""
+  }
+
+  function removeCustomFilter(index) {
+    var next = customFilterTerms.slice()
+    next.splice(index, 1)
+    customFilterTerms = next
+    Qt.callLater(root.focusSearch)
+  }
+
+  function focusSearch() {
+    searchField.forceActiveFocus()
+  }
+
+  function clearFilters() {
+    filterText = ""
+    customFilterTerms = []
+    showDisabledOnly = false
+    showUserInstalledOnly = false
+    reviewHiddenSelection = false
+  }
+
+  function chooseRetention(value) {
+    var days = Number(value)
+    if ([0, 7, 30, 90, 365].indexOf(days) === -1) {
+      console.warn("Plugin Manager: invalid retention period")
+      return
+    }
+    pendingRetentionDays = -1
+    if (days === preferences.retentionDays) return
+    if (days === 0) preferences.retentionDays = 0
+    else pendingRetentionDays = days
+  }
+
+  function confirmRetention() {
+    if ([7, 30, 90, 365].indexOf(pendingRetentionDays) === -1) return
+    preferences.retentionDays = pendingRetentionDays
+    pendingRetentionDays = -1
+  }
+
+  function findRestored() {
+    if (!restoredPluginId) return
+    showHistory = false
+    clearFilters()
+    filterText = restoredPluginId
+    restoredPluginId = ""
+    refresh(false)
+  }
+
+  function closeSettings() {
+    settingsOpen = false
+    pendingRetentionDays = -1
+    pendingDeleteAll = false
+    settingsButton.forceActiveFocus()
+  }
+
+  function keepFocusVisible(item) {
+    if (!item) return
+    var ancestor = item.parent
+    while (ancestor) {
+      if (ancestor === pluginList.contentItem || ancestor === historyList.contentItem
+          || ancestor === settingsFlickable.contentItem || ancestor === panelFlickable.contentItem) {
+        var flick = ancestor.parent
+        var point = item.mapToItem(ancestor, 0, 0)
+        var top = point.y
+        var bottom = top + item.height
+        if (top < flick.contentY) flick.contentY = Math.max(0, top)
+        else if (bottom > flick.contentY + flick.height)
+          flick.contentY = Math.min(Math.max(0, flick.contentHeight - flick.height), bottom - flick.height)
+      }
+      ancestor = ancestor.parent
+    }
+  }
+
+  function removable(plugin) {
+    return plugin.id !== moduleName && !plugin.firstParty && plugin.kinds.indexOf("bar") === -1
+  }
+
+  function unavailableReason(plugin) {
+    if (plugin.id === moduleName) return strings.t("protectedSelf")
+    if (plugin.firstParty) return strings.t(plugin.canDisable ? "protectedNative" : "protectedNativeToggle")
+    if (plugin.kinds.indexOf("bar") !== -1) return strings.t(plugin.canDisable ? "protectedBar" : "protectedBarToggle")
+    if (!plugin.canDisable) return strings.t("protectedToggle")
+    return ""
+  }
+
+  function beginUninstall(candidates) {
+    var targets = candidates.filter(root.removable)
+    pendingUninstallSkipped = candidates.filter(function(plugin) { return !root.removable(plugin) })
+    if (!targets.length) {
+      statusText = strings.t("noActions")
+      return
+    }
+    if (preferences.skipUninstallConfirm) {
+      startHistoryAction({
+        action: "uninstall",
+        ids: targets.map(function(plugin) { return plugin.id }),
+        skippedNames: pendingUninstallSkipped.map(function(plugin) { return plugin.name })
+      })
+      return
+    }
+    pendingUninstallIds = targets.map(function(plugin) { return plugin.id })
+  }
+
+  function changeOne(plugin) {
+    if (busy || plugin.id === moduleName || !plugin.canDisable) return
+    actionVerb = plugin.enabled ? "disable" : "enable"
+    skippedActionNames = []
+    queueActions([["plugin", actionVerb, plugin.id]], [plugin.name])
   }
 
   function open() {
@@ -176,6 +317,8 @@ BarWidget {
     pendingUninstallIds = []
     pendingHistoryDelete = null
     pendingDeleteAll = false
+    pendingRetentionDays = -1
+    reviewHiddenSelection = false
   }
 
   function toggle() {
@@ -216,17 +359,8 @@ BarWidget {
         return plugin.id !== root.moduleName && plugin.canDisable && plugin.enabled
       })
     } else if (action === "remove") {
-      targets = selectedPlugins.filter(function(plugin) {
-        return plugin.id !== root.moduleName && !plugin.firstParty && plugin.kinds.indexOf("bar") === -1
-      })
-      if (targets.length) {
-        if (preferences.skipUninstallConfirm) {
-          startHistoryAction({ action: "uninstall", ids: targets.map(function(plugin) { return plugin.id }) })
-          return
-        }
-        pendingUninstallIds = targets.map(function(plugin) { return plugin.id })
-        return
-      }
+      beginUninstall(selectedPlugins)
+      return
     }
     if (!targets.length) {
       statusText = strings.t("noActions")
@@ -235,14 +369,19 @@ BarWidget {
     var args = targets.map(function(plugin) {
       return ["plugin", action, plugin.id]
     })
-    queueActions(args)
+    skippedActionNames = selectedPlugins.filter(function(plugin) {
+      return !targets.some(function(target) { return target.id === plugin.id })
+    }).map(function(plugin) { return plugin.name })
+    actionVerb = action
+    queueActions(args, targets.map(function(plugin) { return plugin.name }))
   }
 
   function confirmUninstall() {
     var ids = pendingUninstallIds.slice()
+    var skipped = pendingUninstallSkipped.map(function(plugin) { return plugin.name })
     pendingUninstallIds = []
     if (!ids.length || busy) return
-    startHistoryAction({ action: "uninstall", ids: ids })
+    startHistoryAction({ action: "uninstall", ids: ids, skippedNames: skipped })
   }
 
   function refreshHistory() {
@@ -255,6 +394,7 @@ BarWidget {
 
   function startHistoryAction(request) {
     if (busy) return
+    restoredPluginId = ""
     historyMode = "start"
     historyRequest = request
     historyBusy = true
@@ -300,6 +440,20 @@ BarWidget {
         }
         historyBusy = result.busy
         var operation = result.operation
+        if (historyBusy && operation && operation.action === "uninstall"
+            && typeof operation.total === "number" && Array.isArray(operation.completedNames)) {
+          statusText = strings.t("uninstallProgress")
+            .arg(Commons.I18n.formatNumber(operation.completedNames.length))
+            .arg(Commons.I18n.formatNumber(operation.total))
+            .arg(operation.currentName || strings.t("finishing"))
+        }
+        if (historyBusy && operation && ["prune", "delete-all"].indexOf(operation.action) !== -1
+            && typeof operation.total === "number" && typeof operation.processed === "number") {
+          statusText = strings.t("cleanupProgress")
+            .arg(Commons.I18n.formatNumber(operation.processed))
+            .arg(Commons.I18n.formatNumber(operation.total))
+            .arg(operation.currentName || strings.t("finishing"))
+        }
         if (!historyBusy && operation && operation.token !== lastHistoryToken) {
           if (typeof operation.token !== "string" || !/^[a-f0-9]{32}$/.test(operation.token)
               || typeof operation.ok !== "boolean"
@@ -307,12 +461,37 @@ BarWidget {
             throw new Error("Invalid history operation result")
           }
           lastHistoryToken = operation.token
+          restoredPluginId = ""
           if (!operation.ok) {
             statusText = String(operation.error || strings.t("historyFailed")).slice(0, 2000)
+            if (operation.action === "uninstall" && Array.isArray(operation.completedNames)) {
+              statusText = strings.t("uninstallPartial")
+                .arg(operation.completedNames.join(", ") || strings.t("none"))
+                .arg(operation.currentName || strings.t("none"))
+                .arg(Array.isArray(operation.remainingNames) ? operation.remainingNames.join(", ") || strings.t("none") : strings.t("none"))
+                .arg(statusText)
+            } else if (["prune", "delete-all"].indexOf(operation.action) !== -1) {
+              statusText = strings.t("cleanupPartial")
+                .arg(Array.isArray(operation.completedNames) ? operation.completedNames.join(", ") || strings.t("none") : strings.t("none"))
+                .arg(statusText)
+            }
             console.warn("Plugin Manager: " + statusText)
+          } else if (operation.action === "uninstall" && Array.isArray(operation.completedNames)) {
+            statusText = strings.t("historyDone_uninstall") + " " + operation.completedNames.join(", ")
           } else {
             statusText = strings.t("historyDone_" + operation.action)
+            if (operation.action === "restore" && typeof operation.restoredId === "string"
+                && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(operation.restoredId)
+                && operation.restoredId.indexOf("..") === -1) {
+              restoredPluginId = operation.restoredId
+              statusText = strings.t("historyRestored").arg(operation.restoredName || operation.restoredId)
+            }
+            if (Array.isArray(operation.completedNames) && operation.completedNames.length)
+              statusText += " " + operation.completedNames.join(", ")
           }
+          if (operation.action === "uninstall" && Array.isArray(operation.skippedNames)
+              && operation.skippedNames.length)
+            statusText += "\n" + strings.t("willSkip").arg(operation.skippedNames.join(", "))
           refresh(false)
         }
       } else {
@@ -327,8 +506,10 @@ BarWidget {
     }
   }
 
-  function queueActions(args) {
+  function queueActions(args, names) {
     actionQueue = args
+    actionNames = names
+    completedActionNames = []
     actionIndex = 0
     runNextAction()
   }
@@ -337,13 +518,17 @@ BarWidget {
     if (actionIndex >= actionQueue.length) {
       var completed = actionQueue.length
       actionQueue = []
-      statusText = countText("batchDone", completed)
+      statusText = countText("batchDone", completed) + " " + completedActionNames.join(", ")
+      if (skippedActionNames.length) statusText += "\n" + strings.t("willSkip").arg(skippedActionNames.join(", "))
       refresh(false)
       return
     }
     requestType = "action"
     commandProgram = "omarchy"
     commandArgs = actionQueue[actionIndex]
+    statusText = strings.t("actionProgress").arg(strings.t(actionVerb + "Selected"))
+      .arg(Commons.I18n.formatNumber(actionIndex + 1))
+      .arg(Commons.I18n.formatNumber(actionQueue.length)).arg(actionNames[actionIndex])
     helper.running = true
   }
 
@@ -431,6 +616,10 @@ BarWidget {
       statusText = failure
       console.warn("Plugin Manager: " + failure)
       if (requestType === "action") {
+        statusText = strings.t("actionPartial").arg(completedActionNames.join(", ") || strings.t("none"))
+          .arg(actionNames[actionIndex]).arg(actionNames.slice(actionIndex + 1).join(", ") || strings.t("none"))
+          .arg(failure)
+        if (skippedActionNames.length) statusText += "\n" + strings.t("willSkip").arg(skippedActionNames.join(", "))
         actionQueue = []
         Qt.callLater(function() { root.refresh(false) })
       }
@@ -444,6 +633,7 @@ BarWidget {
     }
 
     if (requestType === "action") {
+      completedActionNames.push(actionNames[actionIndex])
       actionIndex++
       Qt.callLater(root.runNextAction)
     }
@@ -475,12 +665,19 @@ BarWidget {
         historyBusy: root.historyBusy,
         historyView: root.showHistory,
         historyEntries: root.uninstallHistory.length,
+        filteredHistory: root.filteredHistory.length,
         backupBytes: root.backupSize,
         settingsOpen: root.settingsOpen,
+        settingsSection: root.settingsSection,
+        pendingRetentionDays: root.pendingRetentionDays,
         settingsScrollHeight: settingsFlickable.contentHeight,
         settingsScrollPosition: settingsFlickable.contentY,
         visiblePlugins: root.visiblePlugins.length,
         filteredPlugins: root.filteredPlugins.length,
+        customFilterCount: root.customFilterTerms.length,
+        selectedPlugins: root.selectedCount,
+        hiddenSelectedPlugins: root.hiddenSelectedPlugins.length,
+        pendingUninstallIds: root.pendingUninstallIds,
         iconHighlighted: root.iconHighlighted,
         barLabel: button.labelText,
         preferences: {
@@ -536,6 +733,15 @@ BarWidget {
     foreground: Commons.Color.popups.text
     titleSize: Style.font.bodySmall
     descriptionSize: Style.font.caption
+    Accessible.role: Accessible.CheckBox
+    Accessible.name: label
+    Accessible.checked: checked
+  }
+
+  component SettingsDropdown: Dropdown {
+    Accessible.role: Accessible.ComboBox
+    Accessible.name: label
+    Accessible.description: currentLabel()
   }
 
   BarIconButton {
@@ -565,21 +771,46 @@ BarWidget {
       id: content
       width: parent.width
       height: parent.height
-      implicitHeight: mainContent.implicitHeight
+      implicitHeight: Math.max(mainContent.implicitHeight, root.settingsOpen ? Style.space(560) : 0)
       clip: true
       focus: true
       Keys.onEscapePressed: {
-        if (root.settingsOpen) {
-          root.settingsOpen = false
-          settingsButton.forceActiveFocus()
+        if (root.settingsOpen && root.pendingRetentionDays > 0) {
+          root.pendingRetentionDays = -1
+        } else if (root.settingsOpen && root.pendingDeleteAll) {
+          root.pendingDeleteAll = false
+        } else if (root.settingsOpen) {
+          root.closeSettings()
+        } else if (root.pendingUninstallIds.length) {
+          root.pendingUninstallIds = []
+        } else if (root.pendingHistoryDelete) {
+          root.pendingHistoryDelete = null
         } else {
           root.close()
         }
       }
 
+      Connections {
+        target: content.Window.window
+        function onActiveFocusItemChanged() {
+          Qt.callLater(function() {
+            if (content.Window.window) root.keepFocusVisible(content.Window.window.activeFocusItem)
+          })
+        }
+      }
+
+      Flickable {
+        id: panelFlickable
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: mainContent.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        Controls.ScrollBar.vertical: ManagerScrollBar { id: panelScrollBar }
+
       Column {
         id: mainContent
-        width: parent.width
+        width: parent.width - (panelScrollBar.visible ? panelScrollBar.width + Style.space(6) : 0)
         spacing: Style.space(10)
 
         RowLayout {
@@ -604,7 +835,7 @@ BarWidget {
           Button {
             text: strings.t("refresh")
             focusable: true
-            enabled: !root.busy
+            enabled: !root.busy && !root.settingsOpen
             onClicked: {
               root.refresh()
               root.refreshHistory()
@@ -619,8 +850,11 @@ BarWidget {
             active: root.settingsOpen
             focusable: true
             onClicked: {
-              root.settingsOpen = !root.settingsOpen
-              if (root.settingsOpen) settingsClose.forceActiveFocus()
+              if (root.settingsOpen) root.closeSettings()
+              else {
+                root.settingsOpen = true
+                settingsClose.forceActiveFocus()
+              }
             }
           }
         }
@@ -637,15 +871,19 @@ BarWidget {
               text: strings.t("installedView")
               active: !root.showHistory
               focusable: true
+              Accessible.role: Accessible.PageTab
+              Accessible.selected: !root.showHistory
               onClicked: {
                 root.showHistory = false
                 root.pendingHistoryDelete = null
               }
             }
             Button {
-              text: strings.t("historyView")
+              text: strings.t("historyTab").arg(Commons.I18n.formatNumber(root.uninstallHistory.length))
               active: root.showHistory
               focusable: true
+              Accessible.role: Accessible.PageTab
+              Accessible.selected: root.showHistory
               onClicked: {
                 root.showHistory = true
                 root.pendingUninstallIds = []
@@ -654,22 +892,103 @@ BarWidget {
             }
           }
 
+          BorderSurface {
+            id: searchBox
+            width: parent.width
+            height: customFilterFlow.implicitHeight + Style.space(8)
+            visible: !root.showHistory
+            radius: Style.cornerRadius
+            color: Style.controlFill(searchField.activeFocus, searchField.hovered,
+              searchField.foreground, searchField.accent)
+            borderSpec: Border.controlSpec(searchField.activeFocus ? "focus"
+              : searchField.hovered ? "hover-cursor" : "normal",
+              searchField.foreground, searchField.accent)
+
+            MouseArea {
+              anchors.fill: parent
+              onClicked: searchField.forceActiveFocus()
+            }
+
+            Flow {
+              id: customFilterFlow
+              x: Style.space(4)
+              y: Style.space(4)
+              width: Math.max(0, parent.width - Style.space(8))
+              height: implicitHeight
+              spacing: Style.space(5)
+              readonly property real inputWidth: {
+                if (!root.customFilterTerms.length) return width
+                var last = chipRepeater.itemAt(root.customFilterTerms.length - 1)
+                if (!last) return width
+                var remaining = width - last.x - last.width - spacing
+                return remaining >= Math.min(width, Style.space(180)) ? remaining : width
+              }
+
+              Repeater {
+                id: chipRepeater
+                model: root.customFilterTerms
+                Button {
+                  required property string modelData
+                  required property int index
+                  width: Math.min(implicitWidth, customFilterFlow.width)
+                  text: modelData + " ×"
+                  active: true
+                  focusable: true
+                  Accessible.name: strings.t("removeCustomFilter").arg(modelData)
+                  tooltipText: strings.t("removeCustomFilter").arg(modelData)
+                  onClicked: root.removeCustomFilter(index)
+                }
+              }
+
+              TextField {
+                id: searchField
+                width: customFilterFlow.inputWidth
+                placeholderText: strings.t(root.customFilterTerms.length ? "addSearchTerm" : "search")
+                Accessible.name: strings.t("search")
+                text: root.filterText
+                background: Item {}
+                onTextChanged: root.filterText = text
+                onAccepted: root.addCustomFilter()
+              }
+            }
+          }
+
           RowLayout {
             width: parent.width
             visible: !root.showHistory
-            TextField {
-              Layout.fillWidth: true
-              placeholderText: strings.t("search")
-              text: root.filterText
-              onTextChanged: root.filterText = text
+            Text {
+              textFormat: Text.PlainText
+                text: strings.t("filters")
+              color: Commons.Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
             }
             Button {
-              text: root.selectableIds.length && root.selectableIds.every(function(id) { return root.selected(id) })
-                ? strings.t("clearSelection") : strings.t("selectAll")
+                text: strings.t("disabledOnly") + (root.showDisabledOnly ? " ×" : "")
+              active: root.showDisabledOnly
               focusable: true
-              enabled: !root.busy && root.selectableIds.length > 0
-              onClicked: root.toggleSelectAll()
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: strings.t("disabledOnly")
+              Accessible.checked: root.showDisabledOnly
+              onClicked: root.showDisabledOnly = !root.showDisabledOnly
             }
+            Button {
+              text: strings.t("userInstalledOnly") + (root.showUserInstalledOnly ? " ×" : "")
+              active: root.showUserInstalledOnly
+              focusable: true
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: strings.t("userInstalledOnly")
+              Accessible.checked: root.showUserInstalledOnly
+              onClicked: root.showUserInstalledOnly = !root.showUserInstalledOnly
+            }
+            Button {
+              text: strings.t("clearFilters")
+              focusable: true
+              enabled: root.filterText.trim() !== "" || root.customFilterTerms.length > 0
+                || root.showDisabledOnly || root.showUserInstalledOnly
+              onClicked: root.clearFilters()
+            }
+            Item { Layout.fillWidth: true }
           }
 
           RowLayout {
@@ -678,29 +997,44 @@ BarWidget {
             Text {
               Layout.fillWidth: true
               textFormat: Text.PlainText
+              text: root.countText("resultCount", root.filteredPlugins.length)
+                + (preferences.hideNative ? " · " + strings.t("nativeHidden") : "")
+              color: Commons.Color.popups.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              elide: Text.ElideRight
+            }
+            Button {
+              text: strings.t("selectVisible")
+              focusable: true
+              enabled: !root.busy && root.selectableIds.length > 0
+              onClicked: root.selectVisible()
+            }
+            Button {
+              text: strings.t("clearAllSelected")
+              focusable: true
+              enabled: !root.busy && root.selectedCount > 0
+              onClicked: { root.selectedIds = []; root.reviewHiddenSelection = false }
+            }
+          }
+
+          RowLayout {
+            width: parent.width
+            visible: !root.showHistory && root.selectedCount > 0
+            Text {
+              Layout.fillWidth: true
+              textFormat: Text.PlainText
               text: root.countText("selectionCount", root.selectedCount)
+                + (root.hiddenSelectedPlugins.length ? " · " + root.countText("hiddenSelectionCount", root.hiddenSelectedPlugins.length) : "")
               color: Commons.Color.popups.text
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
-            Text {
-              textFormat: Text.PlainText
-              text: root.countText("disabledCount", root.disabledCount)
-              color: root.disabledCount > 0 ? Commons.Color.accent : Commons.Color.popups.text
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-            }
             Button {
-              text: root.showDisabledOnly ? strings.t("showAll") : strings.t("disabledOnly")
-              active: root.showDisabledOnly
+              text: root.reviewHiddenSelection ? strings.t("backToResults") : strings.t("reviewHidden")
+              visible: root.hiddenSelectedPlugins.length > 0 || root.reviewHiddenSelection
               focusable: true
-              onClicked: root.showDisabledOnly = !root.showDisabledOnly
-            }
-            Button {
-              text: strings.t("userInstalledOnly")
-              active: root.showUserInstalledOnly
-              focusable: true
-              onClicked: root.showUserInstalledOnly = !root.showUserInstalledOnly
+              onClicked: root.reviewHiddenSelection = !root.reviewHiddenSelection
             }
           }
 
@@ -708,38 +1042,117 @@ BarWidget {
             id: pluginList
             width: parent.width
             visible: !root.showHistory
-            height: Math.min(Math.max(Style.space(50), root.filteredPlugins.length * Style.space(40)), Style.space(360))
+            height: Math.min(Math.max(Style.space(50), root.listPlugins.length * Style.space(62)), Style.space(250))
             clip: true
             spacing: Style.space(2)
             boundsBehavior: Flickable.StopAtBounds
-            model: root.filteredPlugins
+            model: root.listPlugins
             Controls.ScrollBar.vertical: ManagerScrollBar {
               id: listScrollBar
             }
-            delegate: Button {
+            delegate: Rectangle {
               required property var modelData
+              required property int index
+              function focusRow() {
+                if (selectionControl.enabled) selectionControl.forceActiveFocus()
+                else pluginNameControl.forceActiveFocus()
+              }
+              Keys.onPressed: function(event) {
+                if (event.key !== Qt.Key_Down && event.key !== Qt.Key_Up) return
+                var next = index + (event.key === Qt.Key_Down ? 1 : -1)
+                if (next < 0 || next >= pluginList.count) return
+                pluginList.positionViewAtIndex(next, ListView.Contain)
+                Qt.callLater(function() {
+                  var row = pluginList.itemAtIndex(next)
+                  if (row) row.focusRow()
+                })
+                event.accepted = true
+              }
               width: pluginList.width - (listScrollBar.visible ? listScrollBar.width + Style.space(6) : 0)
-              height: Style.space(38)
-              text: strings.t("pluginRow")
-                .arg(strings.t(modelData.firstParty ? "native" : "userInstalled"))
-                .arg(modelData.name)
-                .arg(strings.t(modelData.enabled ? "enabled" : "disabled"))
-                .arg(modelData.id)
-              iconText: root.selected(modelData.id) ? "☑" : "□"
-              tooltipText: modelData.id
-              foreground: modelData.enabled ? Commons.Color.popups.text : Commons.Color.accent
-              leftAlign: true
-              active: root.selected(modelData.id)
-              focusable: true
-              enabled: !root.busy && modelData.id !== root.moduleName
-              onClicked: root.toggleSelected(modelData.id)
+              height: Style.space(60)
+              radius: Style.cornerRadius
+              color: root.selected(modelData.id) ? Util.alpha(Commons.Color.accent, 0.12)
+                : Util.alpha(Commons.Color.popups.text, 0.04)
+              RowLayout {
+                anchors.fill: parent
+                anchors.margins: Style.space(4)
+                spacing: Style.space(4)
+                Button {
+                  id: selectionControl
+                  text: root.selected(modelData.id) ? "☑" : "□"
+                  fontSize: Style.font.subtitle
+                  active: root.selected(modelData.id)
+                  focusable: true
+                  Accessible.role: Accessible.CheckBox
+                  Accessible.name: strings.t("selectPlugin").arg(modelData.name)
+                  Accessible.checked: root.selected(modelData.id)
+                  tooltipText: strings.t("selectPlugin").arg(modelData.name)
+                  enabled: !root.busy && modelData.id !== root.moduleName
+                  onClicked: root.toggleSelected(modelData.id)
+                }
+                Column {
+                  Layout.fillWidth: true
+                  Layout.minimumWidth: Style.space(60)
+                  spacing: Style.space(2)
+                  Button {
+                    id: pluginNameControl
+                    width: parent.width
+                    height: Style.space(23)
+                    horizontalPadding: 0
+                    verticalPadding: 0
+                    text: modelData.name
+                    foreground: modelData.enabled ? Commons.Color.popups.text : Commons.Color.accent
+                    tooltipText: modelData.name + " (" + modelData.id + ")"
+                    focusable: true
+                    Accessible.name: modelData.name + " (" + modelData.id + ")"
+                    leftAlign: true
+                  }
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    text: strings.t(modelData.firstParty ? "native" : "userInstalled") + " · "
+                      + strings.t(modelData.enabled ? "enabled" : "disabled") + " · " + modelData.id
+                    color: modelData.enabled ? Commons.Color.popups.text : Commons.Color.accent
+                    elide: Text.ElideRight
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    width: parent.width
+                    visible: root.unavailableReason(modelData) !== ""
+                    textFormat: Text.PlainText
+                    text: root.unavailableReason(modelData)
+                    color: Commons.Color.popups.text
+                    elide: Text.ElideRight
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                Button {
+                  text: strings.t(modelData.enabled ? "disableOne" : "enableOne")
+                  tooltipText: strings.t(modelData.enabled ? "disablePlugin" : "enablePlugin").arg(modelData.name)
+                  Accessible.name: tooltipText
+                  focusable: true
+                  enabled: !root.busy && modelData.id !== root.moduleName && modelData.canDisable
+                  onClicked: root.changeOne(modelData)
+                }
+                Button {
+                  text: strings.t("uninstallOne")
+                  tooltipText: strings.t("uninstallPlugin").arg(modelData.name)
+                  Accessible.name: tooltipText
+                  focusable: true
+                  enabled: !root.busy && root.removable(modelData)
+                  onClicked: root.beginUninstall([modelData])
+                }
+              }
             }
           }
 
           Text {
-            visible: !root.showHistory && root.filteredPlugins.length === 0
+            visible: !root.showHistory && root.listPlugins.length === 0
             textFormat: Text.PlainText
-            text: strings.t(root.showDisabledOnly ? "noDisabled" : "empty")
+            text: strings.t(root.reviewHiddenSelection ? "noHiddenSelection"
+              : root.visiblePlugins.length === 0 ? "noInstalled" : "empty")
             color: Commons.Color.popups.text
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
@@ -747,7 +1160,7 @@ BarWidget {
 
           RowLayout {
             width: parent.width
-            visible: !root.showHistory
+            visible: !root.showHistory && root.selectedCount > 0
             Button {
               Layout.fillWidth: true
               text: strings.t("enableSelected")
@@ -771,11 +1184,12 @@ BarWidget {
             }
           }
 
-          RowLayout {
+          Column {
             width: parent.width
+            spacing: Style.space(5)
             visible: !root.showHistory && root.pendingUninstallIds.length > 0
             Text {
-              Layout.fillWidth: true
+              width: parent.width
               textFormat: Text.PlainText
               text: strings.tn("confirmRemove", root.pendingUninstallIds.length)
                 .arg(Commons.I18n.formatNumber(root.pendingUninstallIds.length))
@@ -784,16 +1198,42 @@ BarWidget {
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
-            Button {
-              text: strings.t("cancel")
-              focusable: true
-              onClicked: root.pendingUninstallIds = []
+            Flickable {
+              width: parent.width
+              height: Math.min(confirmDetails.implicitHeight, Style.space(100))
+              contentWidth: width
+              contentHeight: confirmDetails.implicitHeight
+              clip: true
+              Controls.ScrollBar.vertical: ManagerScrollBar {}
+              Text {
+                id: confirmDetails
+                width: parent.width - Style.space(16)
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Commons.Color.popups.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                text: strings.t("willUninstall").arg(root.pendingUninstallPlugins.map(function(plugin) {
+                  return plugin.name + " (" + plugin.id + ")"
+                }).join(", ")) + (root.pendingUninstallSkipped.length
+                  ? "\n" + strings.t("willSkip").arg(root.pendingUninstallSkipped.map(function(plugin) {
+                    return plugin.name + " (" + root.unavailableReason(plugin) + ")"
+                  }).join(", ")) : "")
+              }
             }
-            Button {
-              text: strings.t("confirmUninstall")
-              focusable: true
-              enabled: !root.busy
-              onClicked: root.confirmUninstall()
+            RowLayout {
+              width: parent.width
+              Button {
+                text: strings.t("cancel")
+                focusable: true
+                onClicked: root.pendingUninstallIds = []
+              }
+              Button {
+                text: strings.t("confirmUninstall")
+                focusable: true
+                enabled: !root.busy
+                onClicked: root.confirmUninstall()
+              }
             }
           }
 
@@ -812,6 +1252,14 @@ BarWidget {
               font.pixelSize: Style.font.bodySmall
             }
 
+            TextField {
+              width: parent.width
+              placeholderText: strings.t("historySearch")
+              Accessible.name: strings.t("historySearch")
+              text: root.historyFilterText
+              onTextChanged: root.historyFilterText = text
+            }
+
             ListView {
               id: historyList
               width: parent.width
@@ -819,10 +1267,26 @@ BarWidget {
               clip: true
               spacing: Style.space(8)
               boundsBehavior: Flickable.StopAtBounds
-              model: root.uninstallHistory
+              model: root.filteredHistory
               Controls.ScrollBar.vertical: ManagerScrollBar { id: historyScrollBar }
               delegate: Rectangle {
                 required property var modelData
+                required property int index
+                function focusRow() {
+                  if (restoreControl.enabled) restoreControl.forceActiveFocus()
+                  else deleteHistoryControl.forceActiveFocus()
+                }
+                Keys.onPressed: function(event) {
+                  if (event.key !== Qt.Key_Down && event.key !== Qt.Key_Up) return
+                  var next = index + (event.key === Qt.Key_Down ? 1 : -1)
+                  if (next < 0 || next >= historyList.count) return
+                  historyList.positionViewAtIndex(next, ListView.Contain)
+                  Qt.callLater(function() {
+                    var row = historyList.itemAtIndex(next)
+                    if (row) row.focusRow()
+                  })
+                  event.accepted = true
+                }
                 width: historyList.width - (historyScrollBar.visible ? historyScrollBar.width + Style.space(6) : 0)
                 height: historyRow.implicitHeight + Style.space(16)
                 color: Util.alpha(Commons.Color.popups.text, 0.05)
@@ -856,6 +1320,14 @@ BarWidget {
                     Text {
                       width: parent.width
                       textFormat: Text.PlainText
+                      text: strings.t("historySize").arg(root.formatBytes(modelData.size))
+                      color: Commons.Color.popups.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
                       text: strings.t("historyDate").arg(new Date(modelData.removedAt)
                         .toLocaleString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat))
                       elide: Text.ElideRight
@@ -876,13 +1348,17 @@ BarWidget {
                     }
                   }
                   Button {
+                    id: restoreControl
                     text: strings.t("restore")
+                    Accessible.name: strings.t("restorePlugin").arg(modelData.name)
                     focusable: true
                     enabled: !root.busy && modelData.available && !modelData.installed
                     onClicked: root.startHistoryAction({ action: "restore", key: modelData.key })
                   }
                   Button {
+                    id: deleteHistoryControl
                     text: strings.t("deleteBackup")
+                    Accessible.name: strings.t("deletePluginBackup").arg(modelData.name)
                     focusable: true
                     enabled: !root.busy
                     onClicked: root.pendingHistoryDelete = modelData
@@ -893,9 +1369,9 @@ BarWidget {
 
             Text {
               width: parent.width
-              visible: root.uninstallHistory.length === 0 && !root.historyBusy
+              visible: root.filteredHistory.length === 0 && !root.historyBusy
               textFormat: Text.PlainText
-              text: strings.t("historyEmpty")
+              text: strings.t(root.uninstallHistory.length ? "historyNoMatches" : "historyEmpty")
               color: Commons.Color.popups.text
               wrapMode: Text.WordWrap
               font.family: Style.font.family
@@ -910,6 +1386,10 @@ BarWidget {
                 textFormat: Text.PlainText
                 text: strings.t("confirmDeleteBackup")
                   .arg(root.pendingHistoryDelete ? root.pendingHistoryDelete.name : "")
+                  .arg(root.pendingHistoryDelete ? root.pendingHistoryDelete.id : "")
+                  .arg(root.pendingHistoryDelete ? new Date(root.pendingHistoryDelete.removedAt)
+                    .toLocaleString(Qt.locale(Commons.I18n.formatLocale), Locale.ShortFormat) : "")
+                  .arg(root.pendingHistoryDelete ? root.pendingHistoryDelete.key.slice(0, 8) : "")
                 color: Commons.Color.urgent
                 wrapMode: Text.WordWrap
                 font.family: Style.font.family
@@ -931,17 +1411,34 @@ BarWidget {
             }
           }
 
-          Text {
+          Flickable {
             visible: root.statusText !== ""
             width: parent.width
-            textFormat: Text.PlainText
-            text: root.statusText
-            color: Commons.Color.popups.text
-            wrapMode: Text.WordWrap
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            height: Math.min(statusDetails.implicitHeight, Style.space(90))
+            contentWidth: width
+            contentHeight: statusDetails.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Controls.ScrollBar.vertical: ManagerScrollBar {}
+            Text {
+              id: statusDetails
+              width: parent.width - Style.space(16)
+              textFormat: Text.PlainText
+              text: root.statusText
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+          Button {
+            text: strings.t("findRestored")
+            visible: root.restoredPluginId !== ""
+            focusable: true
+            onClicked: root.findRestored()
           }
         }
+      }
       }
 
       Rectangle {
@@ -955,8 +1452,7 @@ BarWidget {
         MouseArea {
           anchors.fill: parent
           onClicked: {
-            root.settingsOpen = false
-            settingsButton.forceActiveFocus()
+            root.closeSettings()
           }
         }
       }
@@ -984,9 +1480,62 @@ BarWidget {
 
         MouseArea { anchors.fill: parent }
 
+        RowLayout {
+          id: settingsHeader
+          anchors.top: parent.top
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.margins: Style.space(14)
+          Text {
+            Layout.fillWidth: true
+            textFormat: Text.PlainText
+            text: strings.t("settings")
+            color: Commons.Color.popups.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+          Button {
+            id: settingsClose
+            text: "\u00d7"
+            tooltipText: strings.t("closeSettings")
+            Accessible.name: strings.t("closeSettings")
+            focusable: root.settingsOpen
+            onClicked: root.closeSettings()
+          }
+        }
+
+        SettingsDropdown {
+          id: settingsNavigation
+          anchors.top: settingsHeader.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.leftMargin: Style.space(14)
+          anchors.rightMargin: Style.space(14)
+          anchors.topMargin: Style.space(6)
+          label: strings.t("settingsSections")
+          value: root.settingsSection
+          options: [
+            { value: "list", label: strings.t("listSettings") },
+            { value: "icon", label: strings.t("barIconSettings") },
+            { value: "position", label: strings.t("moveTo") },
+            { value: "backups", label: strings.t("backupSettings") },
+            { value: "feedback", label: strings.t("feedback") }
+          ]
+          onChanged: function(value) {
+            root.settingsSection = value
+            root.pendingRetentionDays = -1
+            root.pendingDeleteAll = false
+            settingsFlickable.contentY = 0
+          }
+        }
+
         Flickable {
           id: settingsFlickable
-          anchors.fill: parent
+          anchors.top: settingsNavigation.bottom
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
           anchors.margins: Style.space(14)
           contentWidth: width
           contentHeight: settingsContent.implicitHeight
@@ -1001,30 +1550,21 @@ BarWidget {
             LayoutMirroring.enabled: Commons.I18n.rightToLeft
             LayoutMirroring.childrenInherit: true
 
-            RowLayout {
+            Text {
               width: parent.width
-              Text {
-                Layout.fillWidth: true
-                textFormat: Text.PlainText
-                text: strings.t("settings")
-                color: Commons.Color.popups.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.subtitle
-                font.bold: true
-              }
-              Button {
-                id: settingsClose
-                text: "\u00d7"
-                tooltipText: strings.t("closeSettings")
-                Accessible.name: strings.t("closeSettings")
-                focusable: root.settingsOpen
-                onClicked: {
-                  root.settingsOpen = false
-                  settingsButton.forceActiveFocus()
-                }
-              }
+              visible: root.statusText !== ""
+              textFormat: Text.PlainText
+              text: root.statusText
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
             }
 
+            Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.settingsSection === "position"
             Text {
               textFormat: Text.PlainText
               text: strings.t("moveTo")
@@ -1032,22 +1572,41 @@ BarWidget {
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
-            RowLayout {
+            SettingsDropdown {
+              id: placementControl
               width: parent.width
-              Repeater {
-                model: ["left", "center", "right"]
-                Button {
-                  required property string modelData
-                  Layout.fillWidth: true
-                  text: strings.t(modelData)
-                  active: root.currentSection === modelData
-                  focusable: root.settingsOpen
-                  enabled: !root.busy
-                  onClicked: root.moveTo(modelData)
-                }
+              label: strings.t("moveTo")
+              showLabel: false
+              value: root.currentSection
+              enabled: !root.busy
+              options: [
+                { value: "left", label: strings.t("left") },
+                { value: "centerBegin", label: strings.t("centerBegin") },
+                { value: "center", label: strings.t("center") },
+                { value: "centerEnd", label: strings.t("centerEnd") },
+                { value: "right", label: strings.t("right") },
+                { value: "tray", label: strings.t("tray") }
+              ]
+              onChanged: function(value) {
+                root.moveTo(value)
+                placementControl.value = Qt.binding(function() { return root.currentSection })
               }
             }
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: strings.t("positionHelp")
+              color: Commons.Color.popups.text
+              wrapMode: Text.WordWrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+            }
 
+            Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.settingsSection === "list"
             SettingsHeading { text: strings.t("listSettings") }
             SettingsToggle {
               label: strings.t("defaultDisabledOnly")
@@ -1069,9 +1628,14 @@ BarWidget {
                 root.pendingUninstallIds = []
               }
             }
+            }
 
+            Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.settingsSection === "icon"
             SettingsHeading { text: strings.t("barIconSettings") }
-            Dropdown {
+            SettingsDropdown {
               width: parent.width
               label: strings.t("iconColorRule")
               value: preferences.iconColorRule
@@ -1088,9 +1652,15 @@ BarWidget {
               checked: preferences.showBarCount
               onClicked: preferences.showBarCount = !checked
             }
+            }
 
+            Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.settingsSection === "backups"
             SettingsHeading { text: strings.t("backupSettings") }
-            Dropdown {
+            SettingsDropdown {
+              id: retentionControl
               width: parent.width
               label: strings.t("backupRetention")
               value: String(preferences.retentionDays)
@@ -1102,7 +1672,35 @@ BarWidget {
                 { value: "365", label: strings.t("retainDays").arg(Commons.I18n.formatNumber(365)) }
               ]
               onChanged: function(value) {
-                preferences.retentionDays = Number(value)
+                root.chooseRetention(value)
+                retentionControl.value = Qt.binding(function() { return String(preferences.retentionDays) })
+              }
+            }
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.pendingRetentionDays > 0
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: strings.t("confirmRetention").arg(Commons.I18n.formatNumber(root.pendingRetentionDays))
+                color: Commons.Color.urgent
+                wrapMode: Text.WordWrap
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              RowLayout {
+                width: parent.width
+                Button {
+                  text: strings.t("cancel")
+                  focusable: root.settingsOpen
+                  onClicked: root.pendingRetentionDays = -1
+                }
+                Button {
+                  text: strings.t("confirmRetentionAction")
+                  focusable: root.settingsOpen
+                  onClicked: root.confirmRetention()
+                }
               }
             }
             Text {
@@ -1158,16 +1756,6 @@ BarWidget {
                   onClicked: root.startHistoryAction({ action: "delete-all" })
                 }
               }
-              Text {
-                width: parent.width
-                visible: root.statusText !== ""
-                textFormat: Text.PlainText
-                text: root.statusText
-                color: Commons.Color.popups.text
-                wrapMode: Text.WordWrap
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
             }
             SettingsToggle {
               label: strings.t("skipUninstallConfirm")
@@ -1175,7 +1763,12 @@ BarWidget {
               checked: preferences.skipUninstallConfirm
               onClicked: preferences.skipUninstallConfirm = !checked
             }
+            }
 
+            Column {
+            width: parent.width
+            spacing: Style.space(14)
+            visible: root.settingsSection === "feedback"
             SettingsHeading { text: strings.t("feedback") }
             Button {
               width: parent.width
@@ -1204,6 +1797,7 @@ BarWidget {
               wrapMode: Text.WordWrap
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
+            }
             }
           }
         }

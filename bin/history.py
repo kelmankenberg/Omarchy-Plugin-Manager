@@ -298,7 +298,7 @@ class History:
         directory.rmdir()
         sync_directory(self.root)
 
-    def perform(self, request):
+    def perform(self, request, progress=None):
         action = request.get("action")
         if action == "uninstall":
             ids = request.get("ids")
@@ -309,8 +309,31 @@ class History:
             ):
                 raise HistoryError("Select valid, distinct user-installed plugins.")
             plugins = self.installed()
-            for plugin_id in ids:
+            completed = []
+            def label(plugin_id):
+                plugin = plugins.get(plugin_id, {})
+                name = plugin.get("name")
+                return name if isinstance(name, str) and len(name) <= 160 else plugin_id
+
+            for index, plugin_id in enumerate(ids):
+                if progress:
+                    progress({
+                        "current": plugin_id, "total": len(ids),
+                        "completedIds": completed[:], "remainingIds": ids[index + 1:],
+                        "currentName": label(plugin_id),
+                        "completedNames": [label(item) for item in completed],
+                        "remainingNames": [label(item) for item in ids[index + 1:]],
+                    })
                 self.uninstall(plugin_id, plugins)
+                completed.append(plugin_id)
+                if progress:
+                    progress({
+                        "current": "", "total": len(ids),
+                        "completedIds": completed[:], "remainingIds": ids[index + 1:],
+                        "currentName": "",
+                        "completedNames": [label(item) for item in completed],
+                        "remainingNames": [label(item) for item in ids[index + 1:]],
+                    })
             return len(ids)
         if action == "restore":
             self.restore(request.get("key"))
@@ -323,29 +346,45 @@ class History:
             if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 3650:
                 raise HistoryError("Invalid backup retention period.")
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-            return self.delete_many(lambda record: datetime.fromisoformat(record["removedAt"]) < cutoff)
+            return self.delete_many(lambda record: datetime.fromisoformat(record["removedAt"]) < cutoff, progress)
         if action == "delete-all":
-            return self.delete_many(lambda record: True)
+            return self.delete_many(lambda record: True, progress)
         raise HistoryError("Unknown history action.")
 
-    def delete_many(self, matches):
+    def delete_many(self, matches, progress=None):
         deleted = 0
         failures = []
-        for path in [path for path in self.root.iterdir() if not path.name.startswith(".")]:
+        completed_names = []
+        paths = [path for path in self.root.iterdir() if not path.name.startswith(".")]
+        for index, path in enumerate(paths):
+            name = path.name
             try:
                 _, record = self.read_record(path.name)
+                name = record["name"]
+                if progress:
+                    progress({"currentName": name, "processed": index, "total": len(paths),
+                              "completedNames": completed_names[:]})
                 if matches(record):
                     self.delete(path.name)
                     deleted += 1
+                    completed_names.append(name)
             except (HistoryError, OSError, ValueError) as error:
-                failures.append(f"{path.name}: {error}")
+                failures.append(f"{name}: {error}")
+            if progress:
+                progress({"currentName": "", "processed": index + 1, "total": len(paths),
+                          "completedNames": completed_names[:]})
         if failures:
-            raise HistoryError(f"Deleted {deleted} backups; {len(failures)} failed. {failures[0]}")
+            raise HistoryError(f"Deleted {deleted} backups; {len(failures)} failed. " + "; ".join(failures))
         return deleted
 
     def start(self, request):
         if not isinstance(request, dict) or request.get("action") not in ACTIONS:
             raise HistoryError("Invalid history request.")
+        skipped = request.get("skippedNames", [])
+        if not isinstance(skipped, list) or len(skipped) > 250 or any(
+            not isinstance(name, str) or len(name) > 160 for name in skipped
+        ):
+            raise HistoryError("Invalid skipped-plugin details.")
         with self.lock() as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -382,9 +421,20 @@ class History:
     def worker(self, request, lock_fd, token):
         with os.fdopen(lock_fd, "r+"):
             operation = {"token": token, "action": request.get("action"), "busy": False}
+            if request.get("action") == "uninstall":
+                operation["skippedNames"] = request.get("skippedNames", [])
             try:
-                completed = self.perform(request)
+                restored = None
+                if request.get("action") == "restore":
+                    _, restored = self.read_record(request.get("key"))
+                def report_progress(fields):
+                    operation.update(fields)
+                    write_json(self.root / ".operation.json", dict(operation, busy=True))
+
+                completed = self.perform(request, progress=report_progress)
                 operation.update(ok=True, completed=completed)
+                if restored:
+                    operation.update(restoredId=restored["id"], restoredName=restored["name"])
             except (HistoryError, OSError, ValueError, subprocess.SubprocessError) as error:
                 operation.update(ok=False, error=str(error)[:2000])
                 print(f"Omarchy Plugin Manager: {error}", file=sys.stderr, flush=True)

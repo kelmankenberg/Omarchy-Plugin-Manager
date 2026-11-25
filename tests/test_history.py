@@ -83,6 +83,19 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.manager.listing()["entries"], [])
         self.assertFalse(any("enable" in argv for argv in self.calls))
 
+    def test_batch_uninstall_progress_identifies_completed_failed_and_remaining(self):
+        ids = ["test.one", "test.two", "test.three"]
+        plugins = {plugin_id: {"name": name} for plugin_id, name in zip(ids, ("One", "Two", "Three"))}
+        updates = []
+        with patch.object(self.manager, "installed", return_value=plugins), \
+             patch.object(self.manager, "uninstall", side_effect=[None, history.HistoryError("disk full")]):
+            with self.assertRaisesRegex(history.HistoryError, "disk full"):
+                self.manager.perform({"action": "uninstall", "ids": ids}, progress=updates.append)
+        self.assertEqual(updates[-1]["completedNames"], ["One"])
+        self.assertEqual(updates[-1]["currentName"], "Two")
+        self.assertEqual(updates[-1]["remainingNames"], ["Three"])
+        self.assertEqual(updates[-1]["total"], 3)
+
     def test_restore_refuses_existing_installation(self):
         row = self.uninstall()
         self.source.mkdir()
@@ -91,6 +104,27 @@ class HistoryTests(unittest.TestCase):
             self.manager.restore(row["key"])
         self.assertEqual((self.source / "new-file").read_text(), "do not replace")
         self.assertTrue((self.manager.root / row["key"] / "plugin/local-edit.qml").exists())
+
+    def test_worker_persists_identity_of_successfully_restored_plugin(self):
+        row = self.uninstall()
+        lock_fd = os.open(self.manager.root / ".lock", os.O_RDWR)
+        self.manager.worker({"action": "restore", "key": row["key"]}, lock_fd, "a" * 32)
+        result = self.manager.listing()["operation"]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["restoredId"], self.plugin_id)
+        self.assertEqual(result["restoredName"], self.plugin["name"])
+        self.assertTrue(self.source.exists())
+        self.assertFalse(any("enable" in argv for argv in self.calls))
+
+    def test_worker_does_not_report_restore_success_for_a_conflict(self):
+        row = self.uninstall()
+        self.source.mkdir()
+        lock_fd = os.open(self.manager.root / ".lock", os.O_RDWR)
+        self.manager.worker({"action": "restore", "key": row["key"]}, lock_fd, "b" * 32)
+        result = self.manager.listing()["operation"]
+        self.assertFalse(result["ok"])
+        self.assertNotIn("restoredId", result)
+        self.assertTrue((self.manager.root / row["key"] / "plugin").exists())
 
     def test_disabled_failure_preserves_original_and_exposes_incomplete_record(self):
         with patch.object(self.manager, "disable", side_effect=history.HistoryError("IPC unavailable")):
@@ -153,6 +187,25 @@ class HistoryTests(unittest.TestCase):
             self.manager.perform({"action": "delete-all"})
         self.assertTrue((self.manager.root / first["key"]).is_dir())
         self.assertFalse((self.manager.root / second["key"]).exists())
+
+    def test_bulk_cleanup_reports_each_failure_and_completed_progress(self):
+        names = {"a": "Alpha", "b": "Beta", "c": "Gamma"}
+        for key in names:
+            (self.manager.root / key).mkdir()
+        updates = []
+
+        def delete(key):
+            if key != "b":
+                raise history.HistoryError("cannot delete")
+
+        with patch.object(self.manager, "read_record", side_effect=lambda key: (None, {"name": names[key]})), \
+             patch.object(self.manager, "delete", side_effect=delete):
+            with self.assertRaises(history.HistoryError) as failure:
+                self.manager.delete_many(lambda record: True, progress=updates.append)
+        self.assertIn("Alpha: cannot delete", str(failure.exception))
+        self.assertIn("Gamma: cannot delete", str(failure.exception))
+        self.assertEqual(updates[-1]["completedNames"], ["Beta"])
+        self.assertEqual(updates[-1]["processed"], 3)
 
     def test_deletion_affects_only_selected_backup(self):
         first = self.uninstall()
